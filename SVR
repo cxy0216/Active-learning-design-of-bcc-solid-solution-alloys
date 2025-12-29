@@ -1,0 +1,115 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import KFold, cross_val_predict
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.svm import SVR  # 导入 SVR
+from sklearn.preprocessing import StandardScaler  # 导入标准化工具
+from bayes_opt import BayesianOptimization  # 导入贝叶斯优化库
+
+# --------- 读取数据 ---------
+file_path = r'/content/屈服强度.xlsx'
+data = pd.read_excel(file_path)
+# 删除包含空值的行
+data = data.dropna()
+
+# --------- 特征 & 目标 ---------
+X = data.iloc[:, 1:-1]
+y = data.iloc[:, -1]
+print(len(y))
+# # --------- 数据归一化 ---------
+scaler = StandardScaler()  # 使用 StandardScaler 进行标准化
+X = scaler.fit_transform(X)  # 对 X 进行标准化
+
+# scaler = MinMaxScaler()  # 使用 MinMaxScaler 进行标准化
+# X = scaler.fit_transform(X)  # 对 X 进行标准化
+
+# --------- 贝叶斯优化目标函数 ---------
+def train_model(C, epsilon):
+    params = {
+        'C': C,  # 惩罚参数
+        'epsilon': epsilon,  # 容忍度
+        'kernel': 'rbf'  # 核函数
+    }
+
+    model = SVR(**params)
+
+    # 10折交叉验证
+    kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
+    y_pred = cross_val_predict(model, X, y, cv=kf)
+
+    # 计算 RMSE 和 R²
+    rmse = np.sqrt(mean_squared_error(y, y_pred))
+    r2 = r2_score(y, y_pred)
+    return -rmse  # 目标是最小化 RMSE
+
+# 定义贝叶斯优化的参数范围
+bounds = {
+    'C': (1, 10000),  # 惩罚参数
+    'epsilon': (0.01, 100)  # 容忍度
+}
+
+# 贝叶斯优化对象
+optimizer = BayesianOptimization(
+    f=train_model,
+    pbounds=bounds,
+    random_state=42,
+)
+
+# 贝叶斯优化过程
+optimizer.maximize(init_points=10, n_iter=100)
+
+# 输出最佳结果（不包含贝叶斯优化的对象信息）
+print("Best Parameters:", optimizer.max['params'])
+print(f"Best R²: {optimizer.max['target']:.4f}")
+
+# 将优化结果保存到 Excel
+results_df = pd.DataFrame([{
+    'target': res['target'],
+    **res['params']
+} for res in optimizer.res])
+
+# 按 target 降序排列
+results_df = results_df.sort_values(by='target', ascending=False)
+
+# 保存结果到 Excel 文件
+file_path = 'SVR-Optimized-Results.xlsx'
+results_df.to_excel(file_path, index=False)
+
+print(f"Optimization results saved to: {file_path}")
+
+# --------- 使用最佳参数训练最终模型 ---------
+best_params = optimizer.max['params']
+best_model = SVR(
+    C=best_params['C'],
+    epsilon=best_params['epsilon'],
+    kernel='rbf'
+)
+
+# --------- 5折交叉验证 ---------
+kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
+y_pred = cross_val_predict(best_model, X, y, cv=kf)
+
+# --------- 性能指标 ---------
+rmse = np.sqrt(mean_squared_error(y, y_pred))
+r2 = r2_score(y, y_pred)
+
+print(f"5-Fold CV RMSE = {rmse:.4f}")
+print(f"5-Fold CV R² = {r2:.4f}")
+
+# --------- 预测值 vs 真实值 ---------
+plt.figure(figsize=(6,6))
+plt.scatter(y, y_pred, alpha=0.7)
+
+# # 在每个点上标出具体值
+for i in range(len(y)):
+    plt.text(y[i], y_pred[i], f"({y[i]:.2f}, {y_pred[i]:.2f})", fontsize=8, alpha=0.7, color='blue', ha='right', va='bottom')
+
+plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--')
+plt.xlabel("True Yield Strength")
+plt.ylabel("Predicted Yield Strength")
+plt.title("5-Fold CV: Predicted vs True Yield Strength (Optimized)")
+
+plt.grid(True)
+plt.tight_layout()
+plt.show()
