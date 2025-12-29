@@ -1,0 +1,233 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import KFold
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+from bayes_opt import BayesianOptimization
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+
+# ----------------- 读取数据 -----------------
+file_path = r'/content/屈服强度.xlsx'
+data = pd.read_excel(file_path)
+
+# ----------------- 特征 & 目标 -----------------
+X = data.iloc[:, 1:-1].values
+y = data.iloc[:, -1].values
+
+# ----------------- 数据标准化 -----------------
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+
+# ----------------- 自定义 RMSE 损失函数 -----------------
+class RMSELoss(nn.Module):
+    def __init__(self):
+        super(RMSELoss, self).__init__()
+
+    def forward(self, preds, target):
+        mse = torch.mean((preds - target) ** 2)  # 计算均方误差
+        return torch.sqrt(mse)  # 返回平方根
+
+# ----------------- 神经网络结构 -----------------
+class NeuralNetwork(nn.Module):
+    def __init__(self, input_size, n_hidden, w, dropout_prob):
+        super().__init__()
+        layers = []
+        for i in range(w):
+            layers.append(nn.Linear(input_size if i == 0 else n_hidden, n_hidden))
+            layers.append(nn.LayerNorm(n_hidden))  # 添加 LayerNorm
+            layers.append(nn.LeakyReLU())
+            layers.append(nn.Dropout(dropout_prob))
+        layers.append(nn.Linear(n_hidden, 1))
+        self.model = nn.Sequential(*layers)
+        self.apply(self.kaiming_init)
+
+    def forward(self, x):
+        return self.model(x)
+
+    def kaiming_init(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+# ----------------- 贝叶斯优化目标函数 -----------------
+def train_model(lr, n_hidden, w, dropout_prob, weight_decay):
+    set_seed(42)
+    n_hidden = int(n_hidden)
+    w = int(w)
+
+    kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
+    y_true_all = []
+    y_pred_all = []
+
+    # ----------------- 定义设备 -----------------
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    for train_idx, test_idx in kf.split(X):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        model = NeuralNetwork(input_size=X.shape[1], n_hidden=n_hidden, w=w, dropout_prob=dropout_prob).to(device)
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        criterion = RMSELoss()  # 使用自定义 RMSE 损失函数
+
+        X_train_tensor = torch.tensor(X_train, dtype=torch.float32).to(device)
+        y_train_tensor = torch.tensor(y_train, dtype=torch.float32).view(-1,1).to(device)
+        X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
+
+        best_loss = float('inf')  # 初始时最大R²为负无穷
+        best_model_state_dict = None  # 用于保存最佳模型的参数
+
+        # ------- 训练 -------
+        for ep in range(300):
+            model.train()
+            optimizer.zero_grad()
+            preds = model(X_train_tensor)
+            loss = criterion(preds, y_train_tensor)
+            loss.backward()
+            optimizer.step()
+
+            # 评估阶段：计算训练集的损失并记录
+            model.eval()
+            with torch.no_grad():
+                preds_train = model(X_train_tensor)
+                train_loss = criterion(preds_train, y_train_tensor)
+
+            # 更新最佳模型（在训练集上）
+            if train_loss.item() < best_loss:  # 如果当前训练集损失更小，则更新
+                best_loss = train_loss.item()
+                best_model_state_dict = model.state_dict()  # 保存当前最佳模型的权重
+
+        # ------- 预测 -------
+        model.load_state_dict(best_model_state_dict)  # 加载最佳训练集模型
+        model.eval()
+        with torch.no_grad():
+            preds_test = model(X_test_tensor).view(-1).cpu().numpy()
+            y_pred_all.extend(preds_test)
+            y_true_all.extend(y_test)
+
+    # RMSE计算
+    rmse = np.sqrt(mean_squared_error(y_true_all, y_pred_all))
+    return -rmse
+
+# ----------------- 超参数范围 -----------------
+bounds = {
+    'lr': (0.001, 0.05),
+    'n_hidden': (16, 64),
+    'w': (1, 5),
+    'dropout_prob': (0.1, 0.5),
+    'weight_decay': (0.00001, 0.001)
+}
+
+# ----------------- 贝叶斯优化 -----------------
+optimizer = BayesianOptimization(
+    f=train_model,
+    pbounds=bounds,
+    random_state=42
+)
+
+# ----------------- 优化运行 -----------------
+optimizer.maximize(init_points=5, n_iter=50)
+
+# ----------------- 最佳超参数 -----------------
+best_params = optimizer.max['params']
+best_params['n_hidden'] = int(best_params['n_hidden'])
+best_params['w'] = int(best_params['w'])
+
+print("Best Parameters:", best_params)
+
+# ----------------- 保存优化结果 -----------------
+results_df = pd.DataFrame([{
+    'target': res['target'],
+    **res['params']
+} for res in optimizer.res])
+results_df = results_df.sort_values(by='target', ascending=False)
+results_df.to_excel('NeuralNetwork-Optimized-Results.xlsx', index=False)
+
+set_seed(42)
+
+# ----------------- 使用最佳参数做81折 -----------------
+kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
+y_true_all = []
+y_pred_all = []
+
+# 确定设备（GPU 或 CPU）
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+for train_idx, test_idx in kf.split(X):
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    # 初始化模型
+    model = NeuralNetwork(
+        input_size=X.shape[1],
+        n_hidden=best_params['n_hidden'],
+        w=best_params['w'],
+        dropout_prob=best_params['dropout_prob']
+    ).to(device)
+
+    optimizer_final = optim.AdamW(
+        model.parameters(),
+        lr=best_params['lr'],
+        weight_decay=best_params['weight_decay']
+    )
+    criterion = RMSELoss()  # 换成自定义 RMSE Loss
+
+    X_train_tensor = torch.tensor(X_train, dtype=torch.float32).to(device)
+    y_train_tensor = torch.tensor(y_train, dtype=torch.float32).view(-1,1).to(device)
+    X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
+
+    best_train_loss = float('inf')  # 记录训练集的最优损失
+    best_model_state_dict = None  # 用于保存最佳模型的参数
+
+    # 训练过程
+    for epoch in range(300):
+        model.train()
+        optimizer_final.zero_grad()
+        preds = model(X_train_tensor)
+        loss = criterion(preds, y_train_tensor)
+        loss.backward()
+        optimizer_final.step()
+
+        # 评估阶段：计算训练集的损失并记录
+        model.eval()
+        with torch.no_grad():
+            preds_train = model(X_train_tensor)
+            train_loss = criterion(preds_train, y_train_tensor)
+
+        # 更新最佳模型（在训练集上）
+        if train_loss.item() < best_train_loss:  # 如果当前训练集损失更小，则更新
+            best_train_loss = train_loss.item()
+            best_model_state_dict = model.state_dict()  # 保存当前最佳模型的权重
+
+    # 训练集表现最好的模型
+    model.load_state_dict(best_model_state_dict)  # 加载最佳训练集模型
+    model.eval()
+
+    # 预测测试集
+    with torch.no_grad():
+        preds_test = model(X_test_tensor).view(-1).cpu().numpy()
+        y_pred_all.extend(preds_test)
+        y_true_all.extend(y_test)
+
+# ----------------- 性能指标 -----------------
+rmse = np.sqrt(mean_squared_error(y_true_all, y_pred_all))
+r2 = r2_score(y_true_all, y_pred_all)
+print(f"81-Fold CV RMSE = {rmse:.4f}")
+print(f"81-Fold CV R² = {r2:.4f}")
+
+# ----------------- 可视化 -----------------
+plt.figure(figsize=(6,6))
+plt.scatter(y_true_all, y_pred_all, alpha=0.7)
+plt.plot([min(y_true_all), max(y_true_all)], [min(y_true_all), max(y_true_all)], 'r--')
+plt.xlabel("True Yield Strength")
+plt.ylabel("Predicted Yield Strength")
+plt.title("81-Fold CV: Predicted vs True Yield Strength (Neural Network)")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
