@@ -1,0 +1,392 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.svm import SVR
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
+
+# --------- 读取数据 ---------
+file_path = r'/content/屈服强度特征PCC筛选.xlsx'
+data = pd.read_excel(file_path)
+
+# --------- 特征 & 目标 ---------
+X = data.iloc[:, :-1]  # 特征列
+y = data.iloc[:, -1]   # 目标变量
+
+# --------- 数据归一化 ---------
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
+
+# 获取最佳超参数
+best_C = 900.81
+best_epsilon = 3.8196
+print(f"Initial Best Parameters: C = {best_C}, epsilon = {best_epsilon}")
+
+# --------- 自定义分组函数 ---------
+def custom_group_kfold(X, y, group_labels, n_splits=5, random_state=42):
+    """ 按组均匀分配样本到每个折叠中 """
+    unique_groups = np.unique(group_labels)
+    groups = {group: np.where(group_labels == group)[0] for group in unique_groups}
+
+    # 创建 KFold
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    fold_indices = {i: [] for i in range(n_splits)}
+
+    # 按照折叠进行分配
+    for group in unique_groups:
+        group_samples = groups[group]
+        # 在每个折叠中均匀分配该组的样本
+        for fold, (train_idx, test_idx) in enumerate(kf.split(group_samples)):
+            fold_indices[fold].extend(group_samples[test_idx])
+
+    # 确保每个折叠的样本分布均匀
+    for fold in fold_indices:
+        fold_indices[fold] = np.array(fold_indices[fold])
+    return fold_indices
+
+# Define group labels
+group_sizes = [15,6,12,5,11,11,7,5,9,5,7,11,7]
+group_labels = []
+current_group = 1
+for size in group_sizes:
+    group_labels.extend([current_group] * size)
+    current_group += 1
+group_labels = np.array(group_labels)
+
+# --------- 十次五折交叉验证评估函数 ---------
+def evaluate_model_with_ten_fold_cv(X, y):
+    """使用十次五折交叉验证评估模型性能"""
+    all_rmse_results = []
+    all_r2_results = []
+    all_y_true = []
+    all_y_pred = []
+
+    for seed in range(40, 50):  # seeds 40-49
+        fold_indices = custom_group_kfold(X, y, group_labels, n_splits=5, random_state=seed)
+
+        for fold, test_idx in fold_indices.items():
+            train_idx = np.setdiff1d(np.arange(len(X)), test_idx)
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+            # 训练模型
+            model = SVR(C=best_C, epsilon=best_epsilon, kernel='rbf')
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+
+            # 计算性能指标
+            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+            r2 = r2_score(y_test, y_pred)
+
+            all_rmse_results.append(rmse)
+            all_r2_results.append(r2)
+            all_y_true.extend(y_test.tolist())
+            all_y_pred.extend(y_pred.tolist())
+
+    # 返回50个结果的均值和标准差，以及用于绘图的预测值
+    mean_rmse = np.mean(all_rmse_results)
+    std_rmse = np.std(all_rmse_results)
+    mean_r2 = np.mean(all_r2_results)
+    std_r2 = np.std(all_r2_results)
+
+    return mean_rmse, std_rmse, mean_r2, std_r2, all_y_true, all_y_pred
+
+# --------- 前向特征选择 ---------
+# 初始化：只包含前13个固定特征
+selected_features = list(X_scaled.columns[:13])
+candidate_features = list(X_scaled.columns[13:])
+
+print(f"开始前向特征选择过程")
+print(f"固定特征数: {len(selected_features)}")
+print(f"候选特征数: {len(candidate_features)}")
+print(f"固定特征: {selected_features}")
+print(f"候选特征: {candidate_features}")
+
+# 用于保存每轮添加特征后的所有结果
+all_results = []
+# 用于记录每轮添加的最佳特征及其对应的性能
+best_features_to_add = []
+rmse_values = []
+r2_values = []
+rmse_std_values = []
+r2_std_values = []
+
+# 记录全局最佳性能和对应的特征子集
+global_best_rmse = float('inf')
+global_best_feature_set = None
+global_best_performance = None
+feature_sets_performance = []  # 记录每轮后的特征集和性能
+
+# 评估初始特征集性能（只有前13个特征）
+print(f"\n=== 初始特征集评估（前13个特征）===")
+X_current = X_scaled[selected_features]
+initial_rmse, initial_rmse_std, initial_r2, initial_r2_std, _, _ = evaluate_model_with_ten_fold_cv(X_current, y)
+print(f"初始性能: RMSE={initial_rmse:.4f} ± {initial_rmse_std:.4f}, R²={initial_r2:.4f} ± {initial_r2_std:.4f}")
+
+# 记录初始特征集
+feature_sets_performance.append({
+    'Round': 0,
+    'Feature_Count': len(selected_features),
+    'Features': selected_features.copy(),
+    'RMSE_Mean': initial_rmse,
+    'RMSE_Std': initial_rmse_std,
+    'R2_Mean': initial_r2,
+    'R2_Std': initial_r2_std
+})
+
+global_best_rmse = initial_rmse
+global_best_feature_set = selected_features.copy()
+global_best_performance = {
+    'Round': 0,
+    'RMSE_Mean': initial_rmse,
+    'RMSE_Std': initial_rmse_std,
+    'R2_Mean': initial_r2,
+    'R2_Std': initial_r2_std
+}
+
+# 设置停止条件
+max_features = len(X_scaled.columns)  # 最多添加到所有特征
+
+round_num = 1
+while len(candidate_features) > 0 and len(selected_features) < max_features:
+    print(f"\n=== 第 {round_num} 轮特征添加 ===")
+    print(f"当前特征数: {len(selected_features)}")
+    print(f"候选特征数: {len(candidate_features)}")
+
+    best_rmse = float('inf')
+    best_r2 = -np.inf
+    best_feature = None
+    best_rmse_std = 0
+    best_r2_std = 0
+    best_y_true = []
+    best_y_pred = []
+
+    print(f"候选特征: {candidate_features}")
+
+    # 尝试添加每个候选特征
+    for i, feature in enumerate(candidate_features):
+        print(f"  正在评估添加特征 '{feature}' ({i+1}/{len(candidate_features)})...")
+
+        # 创建包含新特征的特征集
+        test_features = selected_features + [feature]
+        X_test = X_scaled[test_features]
+
+        # 使用十次五折交叉验证计算 RMSE 和 R²
+        rmse, rmse_std, r2, r2_std, y_true, y_pred = evaluate_model_with_ten_fold_cv(X_test, y)
+
+        # 打印当前添加特征后的结果
+        print(f"    添加 '{feature}' - RMSE: {rmse:.4f} ± {rmse_std:.4f}, R²: {r2:.4f} ± {r2_std:.4f}")
+
+        # 更新最佳结果（基于RMSE均值）
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_rmse_std = rmse_std
+            best_r2 = r2
+            best_r2_std = r2_std
+            best_feature = feature
+            best_y_true = y_true
+            best_y_pred = y_pred
+
+        # 保存当前添加特征的效果
+        all_results.append({
+            'Round': round_num,
+            'Added Feature': feature,
+            'RMSE_Mean': rmse,
+            'RMSE_Std': rmse_std,
+            'R2_Mean': r2,
+            'R2_Std': r2_std,
+            'Current Features Count': len(selected_features) + 1
+        })
+
+    # 输出最佳特征和对应的 RMSE 和 R²
+    print(f"\n  ✅ 最佳添加特征: {best_feature}")
+    print(f"  📊 最佳性能: RMSE={best_rmse:.4f} ± {best_rmse_std:.4f}, R²={best_r2:.4f} ± {best_r2_std:.4f}")
+
+    # 计算性能改善
+    current_best_rmse = feature_sets_performance[-1]['RMSE_Mean']
+    improvement = current_best_rmse - best_rmse
+    print(f"  📈 性能改善: RMSE减少 {improvement:.4f}")
+
+    # 添加最佳特征到选中列表
+    selected_features.append(best_feature)
+    candidate_features.remove(best_feature)
+
+    # 记录最佳特征和性能
+    best_features_to_add.append(best_feature)
+    rmse_values.append(best_rmse)
+    r2_values.append(best_r2)
+    rmse_std_values.append(best_rmse_std)
+    r2_std_values.append(best_r2_std)
+
+    # 记录当前特征集和性能
+    feature_sets_performance.append({
+        'Round': round_num,
+        'Feature_Count': len(selected_features),
+        'Features': selected_features.copy(),
+        'RMSE_Mean': best_rmse,
+        'RMSE_Std': best_rmse_std,
+        'R2_Mean': best_r2,
+        'R2_Std': best_r2_std
+    })
+
+    # 更新全局最佳性能
+    if best_rmse < global_best_rmse:
+        global_best_rmse = best_rmse
+        global_best_feature_set = selected_features.copy()
+        global_best_performance = {
+            'Round': round_num,
+            'RMSE_Mean': best_rmse,
+            'RMSE_Std': best_rmse_std,
+            'R2_Mean': best_r2,
+            'R2_Std': best_r2_std,
+            'Added_Feature': best_feature
+        }
+        print(f"  🌟 发现新的全局最佳性能！")
+
+    # 绘制实际值与预测值的对比图
+    plt.figure(figsize=(8, 6))
+    plt.scatter(best_y_true, best_y_pred, color='blue', alpha=0.6, label='Predicted vs Actual')
+    plt.plot([min(best_y_true), max(best_y_true)], [min(best_y_true), max(best_y_true)],
+             color='red', linestyle='--', label='Perfect Prediction')
+    plt.xlabel('Actual Values')
+    plt.ylabel('Predicted Values')
+    plt.title(f"Round {round_num}: After Adding '{best_feature}'\n" +
+              f"RMSE={best_rmse:.4f} ± {best_rmse_std:.4f}, R²={best_r2:.4f} ± {best_r2_std:.4f}")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    round_num += 1
+
+print(f"\n🎉 前向特征选择完成！")
+print(f"最终选择特征数: {len(selected_features)}")
+print(f"最终选择的特征: {selected_features}")
+
+# 显示全局最佳性能
+print(f"\n🌟 全局最佳性能:")
+print(f"轮次: {global_best_performance['Round']}")
+print(f"特征数: {len(global_best_feature_set)}")
+print(f"RMSE: {global_best_performance['RMSE_Mean']:.4f} ± {global_best_performance['RMSE_Std']:.4f}")
+print(f"R²: {global_best_performance['R2_Mean']:.4f} ± {global_best_performance['R2_Std']:.4f}")
+print(f"最佳特征集: {global_best_feature_set}")
+
+# 将结果保存到 DataFrame 中
+all_results_df = pd.DataFrame(all_results)
+
+# 保存详细结果
+output_file = '/content/drive/MyDrive/高熵合金数据/屈服强度前向选择结果.xlsx'
+all_results_df.to_excel(output_file, index=False)
+
+# 保存最佳添加特征
+if best_features_to_add:  # 如果有添加的特征
+    best_features_df = pd.DataFrame({
+        'Round': range(1, len(best_features_to_add) + 1),
+        'Best Feature to Add': best_features_to_add,
+        'Best RMSE Mean': rmse_values,
+        'Best RMSE Std': rmse_std_values,
+        'Best R² Mean': r2_values,
+        'Best R² Std': r2_std_values,
+        'Total Features': [13 + i + 1 for i in range(len(best_features_to_add))]
+    })
+
+    best_features_file = '/content/drive/MyDrive/高熵合金数据/屈服强度前向选择最佳特征.xlsx'
+    best_features_df.to_excel(best_features_file, index=False)
+
+# 保存每轮特征集性能对比
+feature_sets_df = pd.DataFrame(feature_sets_performance)
+feature_sets_file = '/content/drive/MyDrive/高熵合金数据/屈服强度前向选择特征集性能.xlsx'
+feature_sets_df.to_excel(feature_sets_file, index=False)
+
+# 保存全局最佳特征子集
+best_subset_info = pd.DataFrame({
+    'Metric': ['Round', 'Feature_Count', 'RMSE_Mean', 'RMSE_Std', 'R2_Mean', 'R2_Std'],
+    'Value': [
+        global_best_performance['Round'],
+        len(global_best_feature_set),
+        global_best_performance['RMSE_Mean'],
+        global_best_performance['RMSE_Std'],
+        global_best_performance['R2_Mean'],
+        global_best_performance['R2_Std']
+    ]
+})
+
+best_features_list = pd.DataFrame({
+    'Feature_Index': range(len(global_best_feature_set)),
+    'Feature_Name': global_best_feature_set
+})
+
+# 保存最佳特征子集
+best_subset_file = '/content/drive/MyDrive/高熵合金数据/屈服强度前向选择最佳特征子集.xlsx'
+with pd.ExcelWriter(best_subset_file, engine='openpyxl') as writer:
+    best_subset_info.to_excel(writer, sheet_name='Performance_Info', index=False)
+    best_features_list.to_excel(writer, sheet_name='Feature_List', index=False)
+
+print(f"\n📁 结果已保存:")
+print(f"  详细结果: {output_file}")
+if best_features_to_add:
+    print(f"  最佳添加特征: {best_features_file}")
+print(f"  特征集性能对比: {feature_sets_file}")
+print(f"  最佳特征子集: {best_subset_file}")
+
+# 显示特征添加顺序摘要
+if best_features_to_add:
+    print(f"\n📋 特征添加顺序摘要:")
+    for i, (feature, rmse, rmse_std, r2, r2_std) in enumerate(zip(
+        best_features_to_add, rmse_values, rmse_std_values, r2_values, r2_std_values)):
+        print(f"  第{i+1}轮: 添加 '{feature}' -> RMSE={rmse:.4f}±{rmse_std:.4f}, R²={r2:.4f}±{r2_std:.4f}")
+
+# 显示每轮性能变化
+print(f"\n📊 每轮性能变化:")
+for perf in feature_sets_performance:
+    status = "🌟 最佳" if perf['Round'] == global_best_performance['Round'] else ""
+    print(f"  轮次{perf['Round']:2d}: {perf['Feature_Count']:2d}个特征 -> RMSE={perf['RMSE_Mean']:.4f}±{perf['RMSE_Std']:.4f}, R²={perf['R2_Mean']:.4f}±{perf['R2_Std']:.4f} {status}")
+
+# 最终模型性能评估
+print(f"\n🔍 最终模型性能评估...")
+X_final = X_scaled[selected_features]
+final_rmse, final_rmse_std, final_r2, final_r2_std, final_y_true, final_y_pred = evaluate_model_with_ten_fold_cv(X_final, y)
+print(f"最终模型 - 10x5-Fold CV RMSE = {final_rmse:.4f} ± {final_rmse_std:.4f}")
+print(f"最终模型 - 10x5-Fold CV R² = {final_r2:.4f} ± {final_r2_std:.4f}")
+
+# 绘制最终模型的预测结果
+plt.figure(figsize=(10, 8))
+plt.scatter(final_y_true, final_y_pred, color='green', alpha=0.6, label='Final Model')
+plt.plot([min(final_y_true), max(final_y_true)], [min(final_y_true), max(final_y_true)],
+         color='red', linestyle='--', label='Perfect Prediction')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.title(f"Final Model Performance (Forward Selection)\n" +
+          f"Features: {len(selected_features)}, RMSE={final_rmse:.4f}±{final_rmse_std:.4f}, R²={final_r2:.4f}±{final_r2_std:.4f}")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# 绘制全局最佳特征子集的性能（如果不是最终模型）
+if global_best_performance['Round'] != len(feature_sets_performance) - 1:
+    print(f"\n🎯 使用全局最佳特征子集进行独立评估...")
+    X_best_subset = X_scaled[global_best_feature_set]
+
+    # 评估性能
+    best_rmse, best_rmse_std, best_r2, best_r2_std, best_y_true, best_y_pred = evaluate_model_with_ten_fold_cv(X_best_subset, y)
+
+    print(f"最佳特征子集独立评估:")
+    print(f"RMSE = {best_rmse:.4f} ± {best_rmse_std:.4f}")
+    print(f"R² = {best_r2:.4f} ± {best_r2_std:.4f}")
+
+    # 绘制最佳特征子集的预测结果
+    plt.figure(figsize=(10, 8))
+    plt.scatter(best_y_true, best_y_pred, color='gold', alpha=0.6, label='Best Feature Subset')
+    plt.plot([min(best_y_true), max(best_y_true)], [min(best_y_true), max(best_y_true)],
+             color='red', linestyle='--', label='Perfect Prediction')
+    plt.xlabel('Actual Values')
+    plt.ylabel('Predicted Values')
+    plt.title(f"Best Feature Subset Performance (Round {global_best_performance['Round']})\n" +
+              f"Features: {len(global_best_feature_set)}, RMSE={best_rmse:.4f}±{best_rmse_std:.4f}, R²={best_r2:.4f}±{best_r2_std:.4f}")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
