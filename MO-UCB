@@ -1,29 +1,20 @@
 import numpy as np
 import pandas as pd
-from bayes_opt import BayesianOptimization
+from scipy.stats import norm
 import joblib
 from sklearn.preprocessing import StandardScaler
 import warnings
+import time
+import csv
+import matplotlib.pyplot as plt
 warnings.filterwarnings("ignore", category=UserWarning)  # 忽略用户警告
 warnings.filterwarnings("ignore", category=DeprecationWarning)  # 忽略弃用警告
 
-def safe_log(x):
-    return np.log(x) if x > 0 else 0  # 对于非正值返回0，避免对零取对数
-# 定义贝叶斯优化的目标函数
-def objective_function(V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, models):
-    # 使冷轧只有80%和90%两个选择
-    if cold_rolling < 85:
-        cold_rolling = 80
-    else:
-        cold_rolling = 90
 
-    # 使再结晶温度只有900℃和1000℃两个选择
-    if T2 < 950:
-        T2 = 900
-    else:
-        T2 = 1000
-
-    # 先将其他元素的含量四舍五入到小数点后两位
+# 修改计算特征并预测性能的函数，Ti自动为1-其他元素总和，元素含量保留两位小数
+def calculate_features_and_predict(V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, models):
+    """计算特征并预测屈服强度和延伸率及其不确定性，Ti含量自动计算"""
+    # 元素含量保留两位小数
     V = round(V, 2)
     Zr = round(Zr, 2)
     Nb = round(Nb, 2)
@@ -32,158 +23,89 @@ def objective_function(V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, 
     Al = round(Al, 2)
     Mo = round(Mo, 2)
 
-    # 计算所有其他元素的总和
+    # 计算除Ti外的所有元素总和
     other_elements_sum = V + Zr + Nb + Hf + Ta + Al + Mo
 
-    # 设置Ti为1减去其他元素的和，如果其他元素和超过1，则Ti设为0
-    Ti = max(0, 1 - other_elements_sum)
-    Ti = round(Ti, 2)
+    # Ti含量为1减去其他元素总和，保留两位小数
+    Ti = round(1 - other_elements_sum, 2)
 
-    # 如果所有元素的和不等于1，需要重新归一化
-    elements = [Ti, V, Zr, Nb, Hf, Ta, Al, Mo]
-    total = sum(elements)
+    # 检查Ti是否在合理范围内
+    if Ti < 0.2:
+        print(f"警告: Ti含量太低 ({Ti:.2f})，可能不符合材料要求")
+    elif Ti > 0.6:
+        print(f"警告: Ti含量太高 ({Ti:.2f})，可能不符合材料要求")
 
-    if total > 0 and abs(total - 1) > 1e-10:  # 考虑浮点数精度问题
-        elements = [round(e/total, 2) for e in elements]
-        Ti, V, Zr, Nb, Hf, Ta, Al, Mo = elements
-
-    # 示例约束
-    while not (0.0 <= Ti <= 0.67 and 0 <= V <= 0.2 and 0 <= Zr <= 0.04 and
-               0.1 <= Nb <= 0.3 and 0.05 <= Hf <= 0.15 and Ta == 0 and
-               0.05 <= Al <= 0.2 and Mo == 0):
-
-        # 调整V
-        if V < 0: V = 0
-        elif V > 0.2: V = 0.2
-
-        # 调整Zr
-        if Zr < 0: Zr = 0
-        elif Zr > 0.3: Zr = 0.3
-
-        # 调整Nb
-        if Nb < 0.1: Nb = 0.1
-        elif Nb > 0.3: Nb = 0.3
-
-        # 调整Hf
-        if Hf < 0.05: Hf = 0.05
-        elif Hf > 0.15: Hf = 0.15
-
-        Ta = 0
-
-        # 调整Al
-        if Al < 0.05: Al = 0.05
-        elif Al > 0.2: Al = 0.2
-
-        Mo = 0
-
-        # 先四舍五入其他元素
-        V = round(V, 2)
-        Zr = round(Zr, 2)
-        Nb = round(Nb, 2)
-        Hf = round(Hf, 2)
-        Ta = round(Ta, 2)
-        Al = round(Al, 2)
-        Mo = round(Mo, 2)
-
-        # 重新计算Ti为1减去其他元素
-        other_elements_sum = V + Zr + Nb + Hf + Ta + Al + Mo
-        Ti = max(0, 1 - other_elements_sum)
-        Ti = round(Ti, 2)
-
-        # 检查Ti是否在允许范围内
-        if Ti > 0.67:
-            # 如果Ti超出范围，按比例增加其他可调整元素
-            excess = Ti - 0.67
-            Ti = 0.67
-
-            # 分配超出部分到其他元素
-            adjustable_elements = [V, Zr, Nb, Hf, Al]  # Ta和Mo为0，不调整
-            max_limits = [0.2, 0.3, 0.3, 0.15, 0.2]
-            current_sum = sum(adjustable_elements)
-
-            if current_sum > 0:
-                for i in range(len(adjustable_elements)):
-                    # 按比例分配excess
-                    adj = min(excess * adjustable_elements[i] / current_sum, max_limits[i] - adjustable_elements[i])
-                    adjustable_elements[i] += adj
-
-                V, Zr, Nb, Hf, Al = adjustable_elements
-            else:
-                # 如果所有可调整元素都为0，则平均分配
-                for i in range(len(adjustable_elements)):
-                    adjustable_elements[i] += excess / len(adjustable_elements)
-                    if adjustable_elements[i] > max_limits[i]:
-                        adjustable_elements[i] = max_limits[i]
-
-                V, Zr, Nb, Hf, Al = adjustable_elements
-
-        # 先对其他元素四舍五入
-        V = round(V, 2)
-        Zr = round(Zr, 2)
-        Nb = round(Nb, 2)
-        Hf = round(Hf, 2)
-        Ta = round(Ta, 2)
-        Al = round(Al, 2)
-        Mo = round(Mo, 2)
-
-        # 计算Ti值
-        other_elements_sum = V + Zr + Nb + Hf + Ta + Al + Mo
-        Ti = max(0, 1 - other_elements_sum)
-        Ti = round(Ti, 2)
-
-        # 如果各元素总和不为1，需要调整
-        total = Ti + other_elements_sum
-        if total > 0 and abs(total - 1) > 1e-10:
-            # 如果总和不为1但接近1，优先调整Ti
-            if abs(total - 1) <= 0.02 and Ti >= 0.02:
-                Ti = round(Ti - (total - 1), 2)
-            else:
-                # 否则才进行完整的归一化
-                elements = [Ti, V, Zr, Nb, Hf, Ta, Al, Mo]
-                elements = [round(e/total, 2) for e in elements]
-                Ti, V, Zr, Nb, Hf, Ta, Al, Mo = elements
-
-    # 输出生成的成分值
-    print(f"Generated composition: Ti={Ti:.2f}, V={V:.2f}, Zr={Zr:.2f}, Nb={Nb:.2f}, "
+    # 输出成分值
+    print(f"成分组成: Ti={Ti:.2f}, V={V:.2f}, Zr={Zr:.2f}, Nb={Nb:.2f}, "
           f"Hf={Hf:.2f}, Ta={Ta:.2f}, Al={Al:.2f}, Mo={Mo:.2f}")
 
-    # # 工艺参数约束
-    # # T1范围检查：均匀化温度
-    # if T1 < 800: T1 = 800
-    # elif T1 > 1200: T1 = 1200
+    # 冷轧只能是80或90
+    if cold_rolling < 85:
+        cold_rolling = 80
+    else:
+        cold_rolling = 90
 
-    # # t1范围检查：均匀化时间(小时)
-    # if t1 < 1: t1 = 1
-    # elif t1 > 24: t1 = 24
+    # T2只能是900或1000
+    if T2 < 950:
+        T2 = 900
+    else:
+        T2 = 1000
 
-    # # cold_rolling范围检查：冷轧率
-    # if cold_rolling < 50: cold_rolling = 50
-    # elif cold_rolling > 90: cold_rolling = 90
+    # t2固定为5分钟
+    t2 = 5
 
-    # # T2范围检查：再结晶温度
-    # if T2 < 700: T2 = 700
-    # elif T2 > 1100: T2 = 1100
+    print(f"使用的工艺参数: 冷轧={cold_rolling}%, 再结晶温度={T2}℃, 再结晶时间={t2}分钟")
 
-    # # t2范围检查：再结晶时间(分钟)
-    # if t2 < 5: t2 = 5
-    # elif t2 > 120: t2 = 120
-
-    # print(f"Process parameters: T1={T1:.1f}°C, t1={t1:.1f}h, cold_rolling={cold_rolling:.1f}%, "
-    #       f"T2={T2:.1f}°C, t2={t2:.1f}min")
+    # 确保成分符合约束
+    if not (0.2 <= Ti <= 0.6 and 0 <= V <= 0.2 and 0 <= Zr <= 0.04 and
+            0 <= Nb <= 0.25 and 0.1 <= Hf <= 0.25 and Ta == 0 and
+            0 <= Al <= 0.1 and Mo == 0):
+        print("警告: 成分不符合约束条件")
 
     # ===================== X1特征计算 (屈服强度) =====================
-    # X1_14 = Ti*0.079 + V*0.525 + Zr*0.426 + Nb*0.917406 + Hf*0.014 + Ta*0.322 + Al*0.43283 + Mo*0.748
+    # X1_14 - 电子亲和能
     X1_14 = Ti*0.079 + V*0.525 + Zr*0.426 + Nb*0.917406 + Hf*0.014 + Ta*0.322 + Al*0.43283 + Mo*0.748
 
-    # X1_15 = Ti*1.54 + V*1.63 + Zr*1.33 + Nb*1.6 + Hf*1.3 + Ta*1.5 + Al*1.61 + Mo*2.16
+    # X1_15 - 电负性
     X1_15 = Ti*1.54 + V*1.63 + Zr*1.33 + Nb*1.6 + Hf*1.3 + Ta*1.5 + Al*1.61 + Mo*2.16
 
-    # X1_16 = Ti*2.95 + V*3.02 + Zr*3.23 + Nb*3.3 + Hf*3.2 + Ta*3.31 + Al*4.05 + Mo*3.15
+    # X1_16 - 熔点
     X1_16 = Ti*2.95 + V*3.02 + Zr*3.23 + Nb*3.3 + Hf*3.2 + Ta*3.31 + Al*4.05 + Mo*3.15
 
-    # X1_17 计算原子半径差异
+    # X1_17 - 熵值
+    X1_17 = -8.314 * (
+        (Ti * np.log(Ti) if Ti > 0 else 0) +
+        (V * np.log(V) if V > 0 else 0) +
+        (Zr * np.log(Zr) if Zr > 0 else 0) +
+        (Nb * np.log(Nb) if Nb > 0 else 0) +
+        (Hf * np.log(Hf) if Hf > 0 else 0) +
+        (Ta * np.log(Ta) if Ta > 0 else 0) +
+        (Al * np.log(Al) if Al > 0 else 0) +
+        (Mo * np.log(Mo) if Mo > 0 else 0)
+    )
+
+    # X1_18 - 熔点与熵的乘积，除以相互作用能
+    X1_18 = (Ti*1943.15 + V*2183.15 + Zr*2127.15 + Nb*2750.15 + Hf*2506.15 + Ta*3290.15 + Al*933.473 + Mo*2895.15) * \
+        (-8.314 * (
+            (Ti * np.log(Ti) if Ti > 0 else 0) +
+            (V * np.log(V) if V > 0 else 0) +
+            (Zr * np.log(Zr) if Zr > 0 else 0) +
+            (Nb * np.log(Nb) if Nb > 0 else 0) +
+            (Hf * np.log(Hf) if Hf > 0 else 0) +
+            (Ta * np.log(Ta) if Ta > 0 else 0) +
+            (Al * np.log(Al) if Al > 0 else 0) +
+            (Mo * np.log(Mo) if Mo > 0 else 0)
+        )) / (4 * (-Ti*V*2 + Ti*Nb*2 + Ti*Ta - Ti*Al*30 - Zr*V*4 + Zr*Nb*4 +
+                    Zr*Ta*3 - Zr*Al*44 - Hf*V*2 + Hf*Nb*4 + Hf*Ta*3 - Hf*Al*39 -
+                    V*Nb - V*Ta - V*Al*16 - Nb*Al*18 - Ta*Al*18 + Mo*Ti*46 -
+                    Mo*Zr*6 - Mo*Nb*6 - Mo*Hf*4 - Mo*Ta*5 + Mo*Al*5))
+
+    # X1_19 - 弹性模量与原子半径差异的加权乘积
+    # 计算原子量总和
     sum_atomic_weight = Ti*146.2 + V*131.6 + Zr*160.3 + Nb*142.9 + Hf*157.8 + Ta*146 + Al*143.2 + Mo*139
-    X1_17 = 100 * np.sqrt(
+
+    # 计算原子半径差异
+    atomic_radius_diff = 100 * np.sqrt(
         Ti * (1 - 146.2/sum_atomic_weight)**2 +
         V * (1 - 131.6/sum_atomic_weight)**2 +
         Zr * (1 - 160.3/sum_atomic_weight)**2 +
@@ -194,89 +116,69 @@ def objective_function(V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, 
         Mo * (1 - 139/sum_atomic_weight)**2
     )
 
-    # X1_18 分数式
-    # 计算总和部分 - 不进行任何简写或合并
-    sum_part = (Ti*146.2 + V*131.6 + Zr*160.3 + Nb*142.9 + Hf*157.8 + Ta*146 + Al*143.2 + Mo*139)
-
-    # 计算分子的第一部分 - 完全按照Excel公式结构
-    numerator_part1_power1 = (sum_part + 131.6)**2
-    numerator_part1_power2 = sum_part**2
-    numerator_part1_subtraction = numerator_part1_power1 - numerator_part1_power2
-    numerator_part1_denominator = (sum_part + 131.6)**2
-    numerator_part1_division = numerator_part1_subtraction / numerator_part1_denominator
-    numerator_part1_sqrt = np.sqrt(numerator_part1_division)
-    numerator_final = 1 - numerator_part1_sqrt
-
-    # 计算分母的第一部分 - 完全按照Excel公式结构
-    denominator_part1_power1 = (sum_part + 160.3)**2
-    denominator_part1_power2 = sum_part**2
-    denominator_part1_subtraction = denominator_part1_power1 - denominator_part1_power2
-    denominator_part1_denominator = (sum_part + 160.3)**2
-    denominator_part1_division = denominator_part1_subtraction / denominator_part1_denominator
-    denominator_part1_sqrt = np.sqrt(denominator_part1_division)
-    denominator_final = 1 - denominator_part1_sqrt
-
-    # 最终计算X1_18 - 分子除以分母
-    X1_18 = numerator_final / denominator_final
-
-    # X1_19 原子半径差异与其他参数乘积
+    # 计算模量总和
     modulus_sum = Ti*116 + V*128 + Zr*68 + Nb*105 + Hf*78 + Ta*186 + Al*70 + Mo*230
-    X1_19 = 0.5 * modulus_sum * X1_17
 
-    # X1_20 综合参数
+    # 计算X1_19
+    X1_19 = 0.5 * modulus_sum * atomic_radius_diff
+
+
+    # X1_19 - 新的计算方法，基于Excel公式
+    # 计算原子量总和（对应Excel公式中的O2）
+    sum_atomic_weight = Ti*146.2 + V*131.6 + Zr*160.3 + Nb*142.9 + Hf*157.8 + Ta*146 + Al*143.2 + Mo*139
+
+    # 计算弹性模量加权求和（对应Excel公式中的$A2*44+$B2*47+...）
+    elastic_modulus_sum = Ti*44 + V*47 + Zr*33 + Nb*38 + Hf*30 + Ta*69 + Al*26 + Mo*120
+
+    # 计算原子半径差异（对应Excel公式中的100*SQRT(...)）
+    atomic_radius_diff = 100 * np.sqrt(
+        Ti * (1 - 146.2/sum_atomic_weight)**2 +
+        V * (1 - 131.6/sum_atomic_weight)**2 +
+        Zr * (1 - 160.3/sum_atomic_weight)**2 +
+        Nb * (1 - 142.9/sum_atomic_weight)**2 +
+        Hf * (1 - 157.8/sum_atomic_weight)**2 +
+        Ta * (1 - 146/sum_atomic_weight)**2 +
+        Al * (1 - 143.2/sum_atomic_weight)**2 +
+        Mo * (1 - 139/sum_atomic_weight)**2
+    )
+
+    # 计算模量总和（对应Excel公式中的$A2*116+$B2*128+...）
+    modulus_sum = Ti*116 + V*128 + Zr*68 + Nb*105 + Hf*78 + Ta*186 + Al*70 + Mo*230
+
+    # 模量与原子半径差异的乘积
+    modulus_radius_product = 0.5 * modulus_sum * atomic_radius_diff
+
+    # 完整的X1_19公式实现（按照Excel公式的分数形式）
+    X1_19 = elastic_modulus_sum * atomic_radius_diff * (
+        (1 + modulus_radius_product) /
+        (1 - modulus_radius_product)
+    )
+
+    # X1_20 - 弹性模量与原子半径差异的综合参数
     elastic_modulus = Ti*44 + V*47 + Zr*33 + Nb*38 + Hf*30 + Ta*69 + Al*26 + Mo*120
     X1_20 = 2 * elastic_modulus / (1 - X1_19)
 
-    # X1_21 二元相互作用能
-    X1_21 = (
-        14.6*Ti*V*2 + 14.1*Ti*Zr + 3.3*Ti*Nb + 11.6*Ti*Hf + 0.2*Ti*Ta + 3*Ti*Al +
-        28.7*V*Zr + 11.3*V*Nb + 26.2*V*Hf + 14.4*V*Ta + 11.6*V*Al +
-        17.4*Zr*Nb + 2.5*Zr*Hf + 14.3*Zr*Ta + 17.1*Zr*Al +
-        14.9*Nb*Hf + 3.1*Nb*Ta + 0.3*Nb*Al +
-        11.8*Hf*Ta + 14.6*Hf*Al + 2.8*Ta*Al +
-        Mo*Ti*7.2 + Mo*V*7.4 + Mo*Zr*21.3 + Mo*Nb*3.9 + Mo*Hf*18.8 + Mo*Ta*7 + Mo*Al*4.1
-    )
-
-    # X1_22 复合参数
-    X1_22 = (elastic_modulus * X1_17 * (1 + X1_19)) / (1 - X1_19)
-
     # ===================== X2特征计算 (延伸率) =====================
-    # X2_14 原子质量
+    # X2_14 - 原子质量
     X2_14 = Ti*47.867 + V*50.9415 + Zr*91.224 + Nb*92.90637 + Hf*178.49 + Ta*180.94788 + Al*26.9815385 + Mo*95.95
 
-    # X2_15 密度
-    X2_15 = Ti*4.506 + V*6 + Zr*6.52 + Nb*8.57 + Hf*13.3 + Ta*16.4 + Al*2.7 + Mo*4.2
+    # X2_15 - 电子亲和能
+    X2_15 = Ti*0.079 + V*0.525 + Zr*0.426 + Nb*0.917406 + Hf*0.014 + Ta*0.322 + Al*0.43283 + Mo*0.748
 
-    # X2_16 相同于X1_14
-    X2_16 = Ti*0.079 + V*0.525 + Zr*0.426 + Nb*0.917406 + Hf*0.014 + Ta*0.322 + Al*0.43283 + Mo*0.748
+    # X2_16 - 价电子数
+    X2_16 = Ti*4 + V*5 + Zr*4 + Nb*5 + Hf*4 + Ta*5 + Al*3 + Mo*6
 
-    # X2_17 价电子数
-    X2_17 = Ti*4 + V*5 + Zr*4 + Nb*5 + Hf*4 + Ta*5 + Al*3 + Mo*6
+    # X2_17 - 熔点
+    X2_17 = Ti*2.95 + V*3.02 + Zr*3.23 + Nb*3.3 + Hf*3.2 + Ta*3.31 + Al*4.05 + Mo*3.15
 
-    # X2_18 电负性
-    X2_18 = Ti*1.54 + V*1.63 + Zr*1.33 + Nb*1.6 + Hf*1.3 + Ta*1.5 + Al*1.61 + Mo*2.16
+    # X2_18 - 硬度
+    X2_18 = Ti*970 + V*628 + Zr*903 + Nb*1320 + Hf*1760 + Ta*873 + Al*167 + Mo*1530
 
-    # X2_19 熔点
-    X2_19 = Ti*2.95 + V*3.02 + Zr*3.23 + Nb*3.3 + Hf*3.2 + Ta*3.31 + Al*4.05 + Mo*3.15
+    # X2_19 - 模量总和
+    X2_19 = Ti*116 + V*128 + Zr*68 + Nb*105 + Hf*78 + Ta*186 + Al*70 + Mo*230
 
-    # X2_20 硬度
-    X2_20 = Ti*970 + V*628 + Zr*903 + Nb*1320 + Hf*1760 + Ta*873 + Al*167 + Mo*1530
-
-    # X2_21 晶格常数
-    X2_21 = Ti*4.33 + V*4.3 + Zr*4.05 + Nb*4.3 + Hf*3.9 + Ta*4.25 + Al*4.28 + Mo*4.37
-
-    # X2_22 电负性差异
-    avg_electronegativity = Ti*1.54 + V*1.63 + Zr*1.33 + Nb*1.6 + Hf*1.3 + Ta*1.5 + Al*1.61 + Mo*2.16
-    X2_22 = 100 * np.sqrt(
-        Ti * (1.54 - avg_electronegativity)**2 +
-        V * (1.63 - avg_electronegativity)**2 +
-        Zr * (1.33 - avg_electronegativity)**2 +
-        Nb * (1.6 - avg_electronegativity)**2 +
-        Hf * (1.3 - avg_electronegativity)**2 +
-        Ta * (1.5 - avg_electronegativity)**2 +
-        Al * (1.61 - avg_electronegativity)**2 +
-        Mo * (2.16 - avg_electronegativity)**2
-    )
+    # X2_20 - 晶格常数
+    X2_20 = Ti*4.33 + V*4.3 + Zr*4.05 + Nb*4.3 + Hf*3.9 + Ta*4.25 + Al*4.28 + Mo*4.37
 
     # 构建特征向量
     # X1用于屈服强度预测
@@ -284,28 +186,29 @@ def objective_function(V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, 
     # 定义列名 - 使用正确的中文括号
     X1_columns = [
         'Ti', 'V', 'Zr', 'Nb', 'Hf', 'Ta', 'Al', 'Mo',  # 8个元素成分
-        '均匀化T1', 't1（h）', '冷轧%', '再结晶T2', 't2（min）',  # 5个工艺参数 - 注意这里使用了中文括号
-        'EA', 'χ', 'a', 'δr', 'γ', 'μ', 'F', 'D.r', 'A'  # 9个计算特征
+        '均匀化T1', 't1（h）', '冷轧%', '再结晶T2', 't2（min）',  # 5个工艺参数
+        'EA', 'χ', 'a', 'δr', 'γ', 'μ', 'F'  # 7个计算特征 - 移除了 'D.r', 'A'
     ]
 
     X2_columns = [
         'Ti', 'V', 'Zr', 'Nb', 'Hf', 'Ta', 'Al', 'Mo',  # 8个元素成分
-        '均匀化T1', 't1（h）', '冷轧%', '再结晶T2', 't2（min）',  # 5个工艺参数 - 注意这里使用了中文括号
-        'Ar', 'ρ', 'EA', 'VEC', 'χ', 'a', 'Hv', 'w', '△χ'  # 9个计算特征
+        '均匀化T1', 't1（h）', '冷轧%', '再结晶T2', 't2（min）',  # 5个工艺参数
+        'Ar', 'EA', 'VEC', 'a', 'Hv', 'μ', 'w'  # 7个计算特征 - 移除了 '△χ'
     ]
 
     # 构建特征向量
     X1_features = [
         Ti, V, Zr, Nb, Hf, Ta, Al, Mo,      # 8个元素成分
         T1, t1, cold_rolling, T2, t2,       # 5个工艺参数
-        X1_14, X1_15, X1_16, X1_17, X1_18, X1_19, X1_20, X1_21, X1_22  # 9个计算特征
+        X1_14, X1_15, X1_16, X1_17, X1_18, X1_19, X1_20  # 7个计算特征，移除了X1_21和X1_22
     ]
 
     X2_features = [
         Ti, V, Zr, Nb, Hf, Ta, Al, Mo,      # 8个元素成分
         T1, t1, cold_rolling, T2, t2,       # 5个工艺参数
-        X2_14, X2_15, X2_16, X2_17, X2_18, X2_19, X2_20, X2_21, X2_22  # 9个计算特征
+        X2_14, X2_15, X2_16, X2_17, X2_18, X2_19, X2_20  # 7个计算特征，移除了X2_21和X2_22
     ]
+
 
     # 将特征向量转换为DataFrame
     X1 = pd.DataFrame([X1_features], columns=X1_columns)
@@ -313,144 +216,657 @@ def objective_function(V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, 
     X2 = pd.DataFrame([X2_features], columns=X2_columns)
     X2 = X2.to_numpy()
 
-    # 打印查看结果
-    print('X1:',X1)
-    print('X2:',X2)
-
-    yield_seeds = [39, 40, 41, 42, 43]  # 屈服强度使用的随机种子
-    elongation_seeds = [2, 39, 44, 45, 256]  # 延伸率使用的随机种子
-    models = load_models(yield_seeds, elongation_seeds)
     # 调用模型预测
     yield_mean_prediction, yield_uncertainty, elongation_mean_prediction, elongation_uncertainty = predict_with_loaded_models(X1, X2, models)
 
-
-    # 目标函数：最大化屈服强度均值和延伸率，并考虑不确定性
-    # 权重可以调整
-#     objective_value = (
-#     0.25 * (yield_mean_prediction - 304.59454) / 1005.7475
-#     + 0.25 * (yield_uncertainty - 11.33473) / 166.66967
-#     + 0.25 * (elongation_mean_prediction - 2.10589) / 27.52909
-#     + 0.25 * (elongation_uncertainty - 0.58343)/ 3.79867
-# )
-    objective_value = (yield_mean_prediction + yield_uncertainty) * (elongation_mean_prediction + elongation_uncertainty)
-    # 将归一化值转换为实际值 (假设这是模型的比例系数，需要根据实际情况调整)
+    # 计算目标值
+    target_value = (yield_mean_prediction[0] + yield_uncertainty[0]) * (elongation_mean_prediction[0] + elongation_uncertainty[0])
 
     # 打印结果
     print(f"Yield Strength: {yield_mean_prediction[0]:.1f} MPa ± {yield_uncertainty[0]}")
     print(f"Elongation: {elongation_mean_prediction[0]:.1f}% ± {elongation_uncertainty[0]}")
-    print(f"Objective value: {objective_value[0]:.4f}")
+    print(f"Target Value: {target_value:.2f}")  # 新增：打印目标值
 
-    return float(objective_value)
+    # 返回预测结果和成分值
+    return yield_mean_prediction[0], yield_uncertainty[0], elongation_mean_prediction[0], elongation_uncertainty[0], \
+           Ti, V, Zr, Nb, Hf, Ta, Al, Mo
+
+# 自定义优化器类
+class CustomOptimizer:
+    def __init__(self, pbounds, random_state=42, top_n=10):
+        self.pbounds = pbounds
+        self.random_state = random_state
+        self.params = list(pbounds.keys())
+        self.dim = len(pbounds)
+        self.observed = []  # 已观测的点
+        self.best_target = -np.inf
+        self.best_params = None
+        self.best_comp_values = None  # 存储最佳组分值
+        self.res = []  # 存储所有结果
+        self.top_n = top_n  # 存储前N个最佳结果
+        self.top_results = []  # 存储前N个最佳结果
+
+    def random_sample(self, n_points=10):
+        """生成随机样本点，并确保Ti含量在有效范围内"""
+        points = []
+        np.random.seed(self.random_state)
+
+        attempt_count = 0
+        max_attempts = n_points * 10  # 最多尝试次数，避免无限循环
+
+        while len(points) < n_points and attempt_count < max_attempts:
+            attempt_count += 1
+            point = {}
+            for param, bounds in self.pbounds.items():
+                point[param] = np.random.uniform(bounds[0], bounds[1])
+                # 将元素含量保留两位小数
+                if param in ['V', 'Zr', 'Nb', 'Hf', 'Ta', 'Al', 'Mo']:
+                    point[param] = round(point[param], 2)
+
+            # 计算Ti含量
+            other_elements_sum = point.get('V', 0) + point.get('Zr', 0) + point.get('Nb', 0) + \
+                                point.get('Hf', 0) + point.get('Ta', 0) + point.get('Al', 0) + point.get('Mo', 0)
+            Ti = round(1 - other_elements_sum, 2)
+
+            # 只有当Ti在合理范围内时，才添加这个点
+            if 0.2 <= Ti <= 0.6:
+                point['Ti'] = Ti  # 添加Ti到点中，方便后续使用
+                points.append(point)
+
+        if len(points) < n_points:
+            print(f"警告: 只生成了{len(points)}个有效点，少于请求的{n_points}个点")
+
+        return points
+
+    def expected_improvement(self, mean, uncertainty, best_f, xi=0.01):
+        """期望改进获取函数"""
+        z = (mean - best_f - xi) / (uncertainty + 1e-9)
+        return (mean - best_f - xi) * norm.cdf(z) + uncertainty * norm.pdf(z)
+
+    def upper_confidence_bound(self, mean, uncertainty, kappa=1):
+        """上置信界获取函数"""
+        return mean + kappa * uncertainty
+
+    # 修改 update_top_results 方法来添加更详细的输出信息
+    def update_top_results(self, params, target, yield_mean, yield_std, elong_mean, elong_std,
+                           Ti, V, Zr, Nb, Hf, Ta, Al, Mo):
+        """更新前N个最佳结果列表，避免重复的目标函数值"""
+        # 检查是否已有相同目标函数值的结果
+        duplicate = False
+        for existing_result in self.top_results:
+            if abs(existing_result['target'] - target) < 1e-6:  # 使用小阈值比较浮点数
+                duplicate = True
+                break
+
+        # 如果发现重复，直接返回，不更新结果列表
+        if duplicate:
+            print(f"发现重复的目标函数值: {target:.2f}，不更新前{self.top_n}名列表")
+            return False
+
+        # 创建新结果
+        result = {
+            'params': params.copy(),
+            'comp_values': {
+                'Ti': Ti, 'V': V, 'Zr': Zr, 'Nb': Nb,
+                'Hf': Hf, 'Ta': Ta, 'Al': Al, 'Mo': Mo
+            },
+            'target': target,
+            'yield_mean': yield_mean,
+            'yield_std': yield_std,
+            'elong_mean': elong_mean,
+            'elong_std': elong_std
+        }
+
+        updated = False
+        # 如果还没有收集够top_n个结果，直接添加
+        if len(self.top_results) < self.top_n:
+            self.top_results.append(result)
+            # 按目标函数值降序排序
+            self.top_results.sort(key=lambda x: x['target'], reverse=True)
+            print(f"添加新结果到前{self.top_n}名列表，目标函数值: {target:.2f}")
+            updated = True
+        # 如果已经有top_n个结果，检查当前结果是否比最差的结果更好
+        elif target > self.top_results[-1]['target']:
+            # 替换最差的结果
+            old_worst = self.top_results[-1]['target']
+            self.top_results[-1] = result
+            # 重新排序
+            self.top_results.sort(key=lambda x: x['target'], reverse=True)
+            print(f"更新前{self.top_n}名列表：用目标函数值 {target:.2f} 替换了之前的最差值 {old_worst:.2f}")
+            updated = True
+        else:
+            print(f"目标函数值 {target:.2f} 不足以进入前{self.top_n}名列表")
+
+        return updated
+
+    def suggest_next_point(self, n_candidates=100, models=None, acq_function='product'):
+        """建议下一个评估点"""
+        candidates = self.random_sample(n_candidates)
+        acquisition_values = []
+
+        for candidate in candidates:
+            # 提取参数
+            V = candidate['V']
+            Zr = candidate['Zr']
+            Nb = candidate['Nb']
+            Hf = candidate['Hf']
+            Ta = candidate['Ta']
+            Al = candidate['Al']
+            Mo = candidate['Mo']
+            T1 = candidate['T1']
+            t1 = candidate['t1']
+            cold_rolling = candidate['cold_rolling']
+            T2 = candidate['T2']
+            t2 = candidate['t2']
+
+            try:
+                # 计算特征并预测
+                yield_mean, yield_std, elong_mean, elong_std, \
+                Ti, V, Zr, Nb, Hf, Ta, Al, Mo = calculate_features_and_predict(
+                    V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, models
+                )
+
+                # 计算获取函数值
+                if acq_function == 'ei':
+                    # 使用期望改进
+                    acq_value = self.expected_improvement(
+                        yield_mean * elong_mean,  # 使用组合指标作为均值
+                        yield_std * elong_std,    # 组合不确定性
+                        self.best_target
+                    )
+                elif acq_function == 'ucb':
+                    # 使用上置信界
+                    kappa = 2.0  # 探索-利用平衡参数
+                    acq_value = self.upper_confidence_bound(
+                        yield_mean * elong_mean,
+                        yield_std * elong_std,
+                        kappa
+                    )
+                elif acq_function == 'product':  # 新增或修改为product
+                    # 使用乘积形式
+                    acq_value = (yield_mean + yield_std) * (elong_mean + elong_std)
+
+                elif acq_function == 'custom':
+                    # 自定义获取函数
+                    # 可以根据需要调整权重
+                    w_yield_mean = 0.4
+                    w_yield_std = 0.1
+                    w_elong_mean = 0.4
+                    w_elong_std = 0.1
+                    acq_value = (w_yield_mean * yield_mean +
+                                w_yield_std * yield_std) * (
+                                w_elong_mean * elong_mean +
+                                w_elong_std * elong_std)
+                else:
+                    # 默认使用乘积
+                    acq_value = (yield_mean + yield_std) * (elong_mean + elong_std)
+
+                print(f"获取函数值: {acq_value:.2f}")  # 新增：打印获取函数值
+
+                # 新增：更新前N个最佳结果
+                # 注意：这里使用获取函数值作为目标函数值
+                target = acq_value
+                self.update_top_results(
+                    candidate, target, yield_mean, yield_std, elong_mean, elong_std,
+                    Ti, V, Zr, Nb, Hf, Ta, Al, Mo
+                )
+
+                acquisition_values.append((candidate, acq_value))
+            except Exception as e:
+                print(f"错误：{e}")
+                # 如果出错，给予一个非常低的获取函数值
+                acquisition_values.append((candidate, -np.inf))
+
+        # 选择获取函数值最高的点
+        best_candidate = max(acquisition_values, key=lambda x: x[1])[0]
+        return best_candidate
+
+    def maximize(self, init_points=10, n_iter=5, acq_function='product'):
+        """主优化循环"""
+        print("初始化优化器...")
+
+        # 加载模型（放在此处避免重复加载）
+        yield_seeds = [39, 40, 41, 42, 43]  # 屈服强度使用的随机种子
+        elongation_seeds = [2, 39, 44, 45, 256]  # 延伸率使用的随机种子
+        models = load_models(yield_seeds, elongation_seeds)
+
+        # 初始点评估
+        print(f"评估{init_points}个初始点...")
+        initial_points = self.random_sample(init_points)
+
+        for i, point in enumerate(initial_points):
+            print(f"评估初始点 {i+1}/{init_points}")
+
+            # 提取参数
+            V = point['V']
+            Zr = point['Zr']
+            Nb = point['Nb']
+            Hf = point['Hf']
+            Ta = point['Ta']
+            Al = point['Al']
+            Mo = point['Mo']
+            T1 = point['T1']
+            t1 = point['t1']
+            cold_rolling = point['cold_rolling']
+            T2 = point['T2']
+            t2 = point['t2']
+
+            # 计算特征和预测，接收成分值
+            yield_mean, yield_std, elong_mean, elong_std, \
+            Ti, V, Zr, Nb, Hf, Ta, Al, Mo = calculate_features_and_predict(
+                V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, models
+            )
+
+            # 计算目标函数值
+            target = (yield_mean + yield_std) * (elong_mean + elong_std)
+
+            print(f"目标函数值: {target:.2f}")
+
+            # 保存结果，增加成分值
+            self.observed.append({
+                'params': point,
+                'comp_values': {
+                    'Ti': Ti, 'V': V, 'Zr': Zr, 'Nb': Nb,
+                    'Hf': Hf, 'Ta': Ta, 'Al': Al, 'Mo': Mo
+                },
+'target': target,
+                'yield_mean': yield_mean,
+                'yield_std': yield_std,
+                'elong_mean': elong_mean,
+                'elong_std': elong_std
+            })
+            self.res.append({
+                'params': point,
+                'target': target
+            })
+
+            # 更新最佳结果
+            if target > self.best_target:
+                self.best_target = target
+                self.best_params = point
+                self.best_comp_values = {  # 保存最佳组分值
+                    'Ti': Ti, 'V': V, 'Zr': Zr, 'Nb': Nb,
+                    'Hf': Hf, 'Ta': Ta, 'Al': Al, 'Mo': Mo
+                }
+
+            # 更新前N个最佳结果
+            self.update_top_results(
+                point, target, yield_mean, yield_std, elong_mean, elong_std,
+                Ti, V, Zr, Nb, Hf, Ta, Al, Mo
+            )
+
+            # 评估后显示当前最好的五个点
+            print("\n------ 评估进度：已评估 {}/{} 点 ------".format(
+                len(self.observed), init_points + i + 1 if i < n_iter else init_points + n_iter
+            ))
+            print("当前前{}名的目标函数值:".format(self.top_n))
+            for idx, top_result in enumerate(self.top_results):
+                print(f"  第{idx+1}名: {top_result['target']:.2f} (屈服强度: {top_result['yield_mean']:.1f} MPa, 延伸率: {top_result['elong_mean']:.1f}%)")
+            print("---------------------------------------\n")
+
+        # 迭代优化
+        print(f"开始{n_iter}次迭代优化...")
+
+        # 在迭代优化循环中，修改这部分代码
+        for i in range(n_iter):
+            print(f"迭代 {i+1}/{n_iter}")
+
+            # 建议下一个点
+            next_point = self.suggest_next_point(n_candidates=50, models=models, acq_function=acq_function)
+
+            # 提取参数
+            V = next_point['V']
+            Zr = next_point['Zr']
+            Nb = next_point['Nb']
+            Hf = next_point['Hf']
+            Ta = next_point['Ta']
+            Al = next_point['Al']
+            Mo = next_point['Mo']
+            T1 = next_point['T1']
+            t1 = next_point['t1']
+            cold_rolling = next_point['cold_rolling']
+            T2 = next_point['T2']
+            t2 = next_point['t2']
+
+            # 计算特征和预测
+            yield_mean, yield_std, elong_mean, elong_std, \
+            Ti, V, Zr, Nb, Hf, Ta, Al, Mo = calculate_features_and_predict(
+                V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, models
+            )
+
+            # 计算目标函数值
+            target = (yield_mean + yield_std) * (elong_mean + elong_std)
+            print(f"目标函数值: {target:.2f}")
+
+            # 保存结果
+            self.observed.append({
+                'params': next_point,
+                'comp_values': {
+                    'Ti': Ti, 'V': V, 'Zr': Zr, 'Nb': Nb,
+                    'Hf': Hf, 'Ta': Ta, 'Al': Al, 'Mo': Mo
+                },
+                'target': target,
+                'yield_mean': yield_mean,
+                'yield_std': yield_std,
+                'elong_mean': elong_mean,
+                'elong_std': elong_std
+            })
+            self.res.append({
+                'params': next_point,
+                'target': target
+            })
+
+            # 更新最佳结果
+            if target > self.best_target:
+                self.best_target = target
+                self.best_params = next_point
+                self.best_comp_values = {  # 新增：保存最佳组分值
+                    'Ti': Ti, 'V': V, 'Zr': Zr, 'Nb': Nb,
+                    'Hf': Hf, 'Ta': Ta, 'Al': Al, 'Mo': Mo
+                }
+                print(f"发现更优解！目标值: {target:.4f}")
+
+            # 更新前N个最佳结果 - 这里没有问题，但看起来没有生效
+            self.update_top_results(
+                next_point, target, yield_mean, yield_std, elong_mean, elong_std,
+                Ti, V, Zr, Nb, Hf, Ta, Al, Mo
+            )
+
+            # 添加：显示当前评估进度和前N名的目标函数值
+            print("\n------ 评估进度：已评估 {}/{} 点 ------".format(
+                len(self.observed), init_points + n_iter
+            ))
+            print("当前前{}名的目标函数值:".format(self.top_n))
+            for idx, top_result in enumerate(self.top_results):
+                print(f"  第{idx+1}名: {top_result['target']:.2f} (屈服强度: {top_result['yield_mean']:.1f} MPa, 延伸率: {top_result['elong_mean']:.1f}%)")
+            print("---------------------------------------\n")
+
+        # 返回最佳结果，增加comp_values和top_results返回
+        return {
+            "target": self.best_target,
+            "params": self.best_params,
+            "comp_values": self.best_comp_values,  # 返回成分值
+            "top_results": self.top_results
+        }
 
 # 定义贝叶斯优化的参数空间
 pbounds = {
+    # Ti不再作为独立参数，而是由其他元素计算得出
     'V': (0, 0.2),     # V含量范围
     'Zr': (0, 0.04),    # Zr含量范围
-    'Nb': (0, 0.25),  # Nb含量范围
-    'Hf': (0.1, 0.25), # Hf含量范围
+    'Nb': (0, 0.25),     # Nb含量范围
+    'Hf': (0.1, 0.25),   # Hf含量范围
     'Ta': (0, 0.000000000001),   # 无Ta
-    'Al': (0, 0.1),  # Al含量范围
+    'Al': (0, 0.1),    # Al含量范围
     'Mo': (0, 0.000000000001),   # 无Mo
     'T1': (25, 25.00000000001),    # 无均匀化
-    't1': (0, 0.00000000000001),   # 无均匀化
-    'cold_rolling': (80, 90),    # 冷轧：只有80%和90%两个选择
-    'T2': (900, 1000),          # 再结晶温度：只有900℃和1000℃两个选择
-    't2': (5, 5.000000000000001)  # 再结晶时间：5分钟
+    't1': (0, 0.00000000000001),        # 无均匀化
+    'cold_rolling': (80, 90),  # 冷轧：只有80%或90%两个选择
+    'T2': (900, 1000),    # 再结晶温度：只有900℃或1000℃两个选择
+    't2': (5, 5.00000000001)        # 再结晶时间：固定为5分钟
 }
 
-# pbounds = {
-#     'Ti': (0.2500000, 0.25000001),     # Ti含量范围
-#     'V': (0.000000001, 0.0000001),     # V含量范围
-#     'Zr': (0.2500000, 0.25000001),    # Zr含量范围
-#     'Nb': (0.2500000, 0.25000001),     # Nb含量范围
-#     'Hf': (0.2500000, 0.25000001),   # Hf含量范围
-#     'Ta': (0.000000001, 0.0000001),   # Ta含量范围
-#     'Al': (0.000000001, 0.0000001),    # Al含量范围
-#     'Mo': (0.000000001, 0.0000001),    # Mo含量范围
-#     'T1': (25.00000, 25.000001),    # 均匀化温度：800-1200℃
-#     't1': (0, 0.0000001),        # 均匀化时间：1-24小时
-#     'cold_rolling': (77.8, 77.80000009),  # 冷轧：50%-90%
-#     'T2': (800, 800.00000001),    # 再结晶温度：700-1100℃
-#     't2': (60, 60.00000001)        # 再结晶时间：5-120分钟
-# }
+# ================ 运行自定义优化器（主程序） ================
 
-# 创建贝叶斯优化对象
-optimizer = BayesianOptimization(
-    f=lambda V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2: objective_function(
-        V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, models
-    ),
-    pbounds=pbounds,
-    random_state=42
-)
+def main():
+    print("开始自定义贝叶斯优化...")
+    # 创建并运行自定义优化器
+    start_time = time.time()
+    custom_optimizer = CustomOptimizer(pbounds=pbounds, random_state=42, top_n=10)  # 跟踪前5个最佳结果
+    result = custom_optimizer.maximize(init_points=10, n_iter=5, acq_function='product')
+    end_time = time.time()
 
-# 进行贝叶斯优化
-optimizer.maximize(init_points=5, n_iter=50)
+    print("\n优化完成！耗时: {:.2f}秒".format(end_time - start_time))
+    print("最佳参数组合:")
+    for param, value in result['params'].items():
+        print(f"  {param}: {value:.2f}")
+    print(f"最佳目标函数值: {result['target']:.2f}")
 
-# 输出最优结果时，需要先四舍五入其他元素，再计算Ti的值
-best_params = optimizer.max['params']
-# 先将其他元素四舍五入到两位小数
-rounded_params = {}
-for param, value in best_params.items():
-    if param in ['V', 'Zr', 'Nb', 'Hf', 'Ta', 'Al', 'Mo']:
-        rounded_params[param] = round(value, 2)
-    else:
-        rounded_params[param] = value
+    # 输出最佳成分值
+    print("\n最佳成分值:")
+    comp_values = result['comp_values']
+    for element, value in comp_values.items():
+        print(f"  {element}: {value:.2f}")
+    total = sum(comp_values.values())
+    print(f"  总和: {total:.2f}")
 
-# 计算其他元素的总和
-other_elements_sum = (
-    rounded_params['V'] + rounded_params['Zr'] + rounded_params['Nb'] +
-    rounded_params['Hf'] + rounded_params['Ta'] + rounded_params['Al'] + rounded_params['Mo']
-)
-Ti_value = round(max(0, 1 - other_elements_sum), 2)
+    # 加载模型进行最终验证
+    yield_seeds = [39, 40, 41, 42, 43]
+    elongation_seeds = [2, 39, 44, 45, 256]
+    models = load_models(yield_seeds, elongation_seeds)
 
-print("Best Parameters:")
-print(f"Ti: {Ti_value:.2f}")  # 添加Ti的计算值
-for param, value in rounded_params.items():
-    if param in ['V', 'Zr', 'Nb', 'Hf', 'Ta', 'Al', 'Mo']:
-        print(f"{param}: {value:.2f}")
-    else:
-        print(f"{param}: {value}")
+    # 详细分析最佳组合
+    print("\n详细分析最佳参数组合:")
+    best_params = result['params']
+    yield_mean, yield_std, elong_mean, elong_std, Ti, V, Zr, Nb, Hf, Ta, Al, Mo = calculate_features_and_predict(
+        best_params['V'], best_params['Zr'], best_params['Nb'],
+        best_params['Hf'], best_params['Ta'], best_params['Al'], best_params['Mo'],
+        best_params['T1'], best_params['t1'], best_params['cold_rolling'],
+        best_params['T2'], best_params['t2'], models
+    )
 
-print("\n详细分析最佳参数组合:")
-objective_function(
-    rounded_params['V'], rounded_params['Zr'], rounded_params['Nb'],
-    rounded_params['Hf'], rounded_params['Ta'], rounded_params['Al'], rounded_params['Mo'],
-    rounded_params['T1'], rounded_params['t1'], rounded_params['cold_rolling'],
-    rounded_params['T2'], rounded_params['t2'], models
-)
+    print(f"屈服强度: {yield_mean:.2f} MPa ± {yield_std:.2f}")
+    print(f"延伸率: {elong_mean:.2f}% ± {elong_std:.2f}")
 
-# 保存最优结果
-best_result = {
-    'composition': {
-        'Ti': Ti_value,  # 添加计算得到的Ti值
-        'V': rounded_params['V'],
-        'Zr': rounded_params['Zr'],
-        'Nb': rounded_params['Nb'],
-        'Hf': rounded_params['Hf'],
-        'Ta': rounded_params['Ta'],
-        'Al': rounded_params['Al'],
-        'Mo': rounded_params['Mo']
-    },
-    'process': {
-        'T1': rounded_params['T1'],
-        't1': rounded_params['t1'],
-        'cold_rolling': rounded_params['cold_rolling'],
-        'T2': rounded_params['T2'],
-        't2': rounded_params['t2']
-    },
-    'objective_value': optimizer.max['target']
-}
+    # 保存最佳结果
+    best_result = {
+        'composition': {
+            'Ti': Ti,
+            'V': V,
+            'Zr': Zr,
+            'Nb': Nb,
+            'Hf': Hf,
+            'Ta': Ta,
+            'Al': Al,
+            'Mo': Mo
+        },
+        'process': {
+            'T1': best_params['T1'],
+            't1': best_params['t1'],
+            'cold_rolling': best_params['cold_rolling'],
+            'T2': best_params['T2'],
+            't2': best_params['t2']
+        },
+        'performance': {
+            'yield_strength_mean': float(yield_mean),
+            'yield_strength_std': float(yield_std),
+            'elongation_mean': float(elong_mean),
+            'elongation_std': float(elong_std),
+            'objective_value': float(result['target'])
+        }
+    }
 
-# 将结果保存到CSV文件
-import csv
-with open('/content/drive/MyDrive/高熵合金数据/bayesian_optimization_best_result.csv', 'w', newline='') as csvfile:
-    writer = csv.writer(csvfile)
-    writer.writerow(['Parameter', 'Value'])
-    for category, params in best_result.items():
-        if isinstance(params, dict):
-            for param_name, param_value in params.items():
-                writer.writerow([f"{category}_{param_name}", param_value])
-        else:
-            writer.writerow([category, params])
+    # 保存前N个最佳结果
+    print(f"\n保存前{len(result['top_results'])}个最佳结果:")
 
-print("最佳结果已保存到文件")
+    # 保存性能指标到一个CSV文件
+    with open('custom_bayesian_optimization_performance.csv', 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+
+        # 写入表头
+        writer.writerow(['排名', '目标函数值', '屈服强度(MPa)', '屈服标准差', '延伸率(%)', '延伸标准差'])
+
+        # 对于每个结果，写入性能数据
+        for i, res in enumerate(result['top_results']):
+            writer.writerow([
+                i+1,  # 排名
+                res['target'],  # 目标函数值
+                res['yield_mean'],  # 屈服强度均值
+                res['yield_std'],  # 屈服强度标准差
+                res['elong_mean'],  # 延伸率均值
+                res['elong_std']  # 延伸率标准差
+            ])
+
+    # 保存原始参数到一个CSV文件
+    with open('custom_bayesian_optimization_parameters.csv', 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+
+        # 创建表头行 - 排名和所有参数名
+        header_row = ['排名']
+        for param in custom_optimizer.params:
+            header_row.append(param)
+        writer.writerow(header_row)
+
+        # 每个排名一行，包含所有参数值
+        for i, res in enumerate(result['top_results']):
+            row = [i+1]  # 排名
+            for param in custom_optimizer.params:
+                row.append(res['params'][param])
+            writer.writerow(row)
+
+    # 保存成分到一个CSV文件
+    with open('custom_bayesian_optimization_composition.csv', 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+
+        # 写入表头
+        writer.writerow(['排名', 'Ti', 'V', 'Zr', 'Nb', 'Hf', 'Ta', 'Al', 'Mo', '总和',
+                        '冷轧(%)', '再结晶温度(℃)', '再结晶时间(min)'])  # 添加工艺参数
+
+        # 对于每个结果，写入成分数据和工艺参数
+        for i, res in enumerate(result['top_results']):
+            comp_values = res['comp_values']
+            total = sum(comp_values.values())  # 计算总和（理论上应该等于1）
+
+            # 获取实际使用的工艺参数（经过离散化处理后的）
+            cold_rolling = 80 if res['params']['cold_rolling'] < 85 else 90
+            T2 = 900 if res['params']['T2'] < 950 else 1000
+            t2 = 5  # 固定为5分钟
+
+            writer.writerow([
+                i+1,  # 排名
+                comp_values['Ti'],
+                comp_values['V'],
+                comp_values['Zr'],
+                comp_values['Nb'],
+                comp_values['Hf'],
+                comp_values['Ta'],
+                comp_values['Al'],
+                comp_values['Mo'],
+                total,  # 总和，用于验证
+                cold_rolling,  # 添加冷轧百分比
+                T2,  # 添加再结晶温度
+                t2   # 添加再结晶时间
+            ])
+
+    # 新增：额外保存一个专门包含工艺参数的CSV文件
+    with open('custom_bayesian_optimization_process_parameters.csv', 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+
+        # 写入表头
+        writer.writerow(['排名', '冷轧(%)', '再结晶温度(℃)', '再结晶时间(min)',
+                        '屈服强度(MPa)', '延伸率(%)', '目标函数值'])
+
+        # 对于每个结果，写入工艺参数和性能指标
+        for i, res in enumerate(result['top_results']):
+            # 获取实际使用的工艺参数（经过离散化处理后的）
+            cold_rolling = 80 if res['params']['cold_rolling'] < 85 else 90
+            T2 = 900 if res['params']['T2'] < 950 else 1000
+            t2 = 5  # 固定为5分钟
+
+            writer.writerow([
+                i+1,  # 排名
+                cold_rolling,  # 冷轧百分比
+                T2,  # 再结晶温度
+                t2,  # 再结晶时间
+                res['yield_mean'],  # 屈服强度
+                res['elong_mean'],  # 延伸率
+                res['target']  # 目标函数值
+            ])
+
+    print(f"前{len(result['top_results'])}个最佳结果已保存到四个CSV文件")
+    print("- custom_bayesian_optimization_performance.csv (性能指标)")
+    print("- custom_bayesian_optimization_parameters.csv (原始参数)")
+    print("- custom_bayesian_optimization_composition.csv (成分)")
+    print("- custom_bayesian_optimization_process_parameters.csv (工艺参数与性能)")
+
+    # 可视化优化过程
+    try:
+        import matplotlib.pyplot as plt
+
+        # 提取所有观测点的目标函数值
+        targets = [obs['target'] for obs in custom_optimizer.observed]
+        iterations = range(len(targets))
+
+        # 绘制优化进程图
+        plt.figure(figsize=(10, 6))
+        plt.plot(iterations, targets, 'bo-')
+        plt.axhline(y=result['target'], color='r', linestyle='--', label='最佳值')
+        plt.xlabel('迭代次数')
+        plt.ylabel('目标函数值')
+        plt.title('自定义贝叶斯优化进程')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig('optimization_progress.png')
+        plt.show()
+
+        # 绘制前N个最佳结果比较图
+        if len(result['top_results']) > 1:
+            # 准备数据
+            ranks = range(1, len(result['top_results']) + 1)
+            objectives = [res['target'] for res in result['top_results']]
+            yields = [res['yield_mean'] for res in result['top_results']]
+            elongations = [res['elong_mean'] for res in result['top_results']]
+
+            # 创建子图
+            fig, axs = plt.subplots(3, 1, figsize=(10, 12))
+
+            # 目标函数值图
+            axs[0].bar(ranks, objectives, color='blue')
+            axs[0].set_xlabel('排名')
+            axs[0].set_ylabel('目标函数值')
+            axs[0].set_title('前N个最佳结果的目标函数值')
+            axs[0].grid(True, axis='y')
+
+            # 屈服强度图
+            axs[1].bar(ranks, yields, color='green')
+            axs[1].set_xlabel('排名')
+            axs[1].set_ylabel('屈服强度 (MPa)')
+            axs[1].set_title('前N个最佳结果的屈服强度')
+            axs[1].grid(True, axis='y')
+
+            # 延伸率图
+            axs[2].bar(ranks, elongations, color='orange')
+            axs[2].set_xlabel('排名')
+            axs[2].set_ylabel('延伸率 (%)')
+            axs[2].set_title('前N个最佳结果的延伸率')
+            axs[2].grid(True, axis='y')
+
+            plt.tight_layout()
+            plt.savefig('top_results_comparison.png')
+            plt.show()
+
+            # 绘制前N个最佳结果的成分图
+            plt.figure(figsize=(12, 8))
+
+            # 准备数据
+            elements = ['Ti', 'V', 'Zr', 'Nb', 'Hf', 'Ta', 'Al', 'Mo']
+            num_elements = len(elements)
+            num_results = len(result['top_results'])
+
+            # 设置x轴位置
+            x = np.arange(num_elements)
+            width = 0.15  # 柱状图宽度
+
+            # 创建不同颜色
+            colors = ['blue', 'green', 'red', 'orange', 'purple']
+
+            # 为每个排名创建一个柱状图
+            for i, res in enumerate(result['top_results']):
+                comp_values = res['comp_values']
+                values = [comp_values[element] for element in elements]
+                plt.bar(x + i*width - (num_results-1)*width/2, values, width,
+                        label=f'排名 {i+1}', color=colors[i%len(colors)])
+
+            plt.xlabel('元素')
+            plt.ylabel('元素成分比例')
+            plt.title('前N个最佳结果的元素成分比较')
+            plt.xticks(x, elements)
+            plt.legend()
+            plt.grid(True, axis='y')
+            plt.savefig('composition_comparison.png')
+            plt.show()
+    except Exception as e:
+        print(f"绘图出错: {e}")
+
+if __name__ == "__main__":
+    main()
