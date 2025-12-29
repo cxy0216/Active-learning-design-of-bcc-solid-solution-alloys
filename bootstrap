@@ -1,0 +1,554 @@
+import pandas as pd
+import numpy as np
+from sklearn.svm import SVR
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm
+import warnings
+warnings.filterwarnings('ignore')
+
+class SVRBootstrapEnsemble:
+    def __init__(self, n_estimators=1000, C=900.81, epsilon=3.8196, random_state=42):
+        self.n_estimators = n_estimators
+        self.C = C
+        self.epsilon = epsilon
+        self.random_state = random_state
+        self.models = []
+        self.scalers_X = []
+        self.is_fitted = False
+        # 存储每个模型的性能指标
+        self.model_metrics = []
+
+    def _bootstrap_sample(self, X, y):
+        """生成bootstrap样本和OOB样本"""
+        n_samples = len(X)
+        indices = np.random.choice(n_samples, size=n_samples, replace=True)
+
+        # Bootstrap样本
+        X_boot = X[indices]
+        y_boot = y[indices]
+
+        # Out-of-Bag样本（未被选中的样本）
+        oob_mask = np.ones(n_samples, dtype=bool)
+        oob_mask[np.unique(indices)] = False
+        oob_indices = np.where(oob_mask)[0]
+
+        if len(oob_indices) > 0:
+            X_oob = X[oob_indices]
+            y_oob = y[oob_indices]
+        else:
+            X_oob = np.array([]).reshape(0, X.shape[1])
+            y_oob = np.array([])
+
+        return X_boot, y_boot, X_oob, y_oob, oob_indices
+
+    def _calculate_metrics(self, y_true, y_pred):
+        """计算评估指标"""
+        mae = mean_absolute_error(y_true, y_pred)
+        mse = mean_squared_error(y_true, y_pred)
+        rmse = np.sqrt(mse)
+        r2 = r2_score(y_true, y_pred)
+        return mae, mse, rmse, r2
+
+    def fit(self, X, y, show_progress=10, save_excel=True, excel_path="yield_strength_σy_model_metrics.xlsx"):
+        """训练Bootstrap集成模型并计算OOB误差，记录每个模型的指标"""
+        X = np.array(X)
+        y = np.array(y)
+
+        np.random.seed(self.random_state)
+
+        print(f"开始训练{self.n_estimators}个SVR模型...")
+        print(f"每{show_progress}个模型显示一次详细指标")
+        print("注意：目标变量屈服强度(σy)不进行标准化")
+
+        # 存储OOB预测
+        oob_predictions = np.full((len(X), self.n_estimators), np.nan)
+        oob_counts = np.zeros(len(X))
+
+        # 重置模型指标记录
+        self.model_metrics = []
+
+        for i in tqdm(range(self.n_estimators), desc="Training models"):
+            # Bootstrap采样，获取训练集和OOB测试集
+            X_boot, y_boot, X_oob, y_oob, oob_indices = self._bootstrap_sample(X, y)
+
+            if len(X_boot) == 0:
+                continue
+
+            # 只对特征X进行标准化，屈服强度y保持原始尺度
+            scaler_X = StandardScaler()
+            X_boot_scaled = scaler_X.fit_transform(X_boot)
+            y_boot_original = y_boot  # 屈服强度y不进行标准化
+
+            # 训练SVR模型
+            svr = SVR(C=self.C, epsilon=self.epsilon, kernel='rbf')
+            svr.fit(X_boot_scaled, y_boot_original)
+
+            # 保存模型和特征标准化器
+            self.models.append(svr)
+            self.scalers_X.append(scaler_X)
+
+            # 计算训练集性能
+            y_train_pred = svr.predict(X_boot_scaled)
+            train_mae, train_mse, train_rmse, train_r2 = self._calculate_metrics(y_boot_original, y_train_pred)
+
+            # 初始化当前模型指标
+            current_metrics = {
+                'Model': i + 1,
+                'Train_Samples': len(y_boot),
+                'Train_MAE': train_mae,
+                'Train_MSE': train_mse,
+                'Train_RMSE': train_rmse,
+                'Train_R2': train_r2,
+                'OOB_Samples': len(y_oob),
+                'OOB_MAE': np.nan,
+                'OOB_MSE': np.nan,
+                'OOB_RMSE': np.nan,
+                'OOB_R2': np.nan
+            }
+
+            # 对OOB样本进行预测
+            if len(X_oob) > 0:
+                X_oob_scaled = scaler_X.transform(X_oob)
+                y_oob_pred = svr.predict(X_oob_scaled)
+
+                # 计算OOB性能
+                oob_mae, oob_mse, oob_rmse, oob_r2 = self._calculate_metrics(y_oob, y_oob_pred)
+                current_metrics.update({
+                    'OOB_MAE': oob_mae,
+                    'OOB_MSE': oob_mse,
+                    'OOB_RMSE': oob_rmse,
+                    'OOB_R2': oob_r2
+                })
+
+                # 存储OOB预测
+                oob_predictions[oob_indices, i] = y_oob_pred
+                oob_counts[oob_indices] += 1
+
+            # 保存当前模型的指标
+            self.model_metrics.append(current_metrics)
+
+            # 显示进度信息
+            if (i + 1) % show_progress == 0 or i == 0:
+                print(f"\n--- 模型 {i+1} ---")
+                print(f"训练集: MAE={train_mae:.4f}, RMSE={train_rmse:.4f}, R²={train_r2:.4f}")
+                if len(y_oob) > 0:
+                    print(f"OOB测试: MAE={current_metrics['OOB_MAE']:.4f}, RMSE={current_metrics['OOB_RMSE']:.4f}, R²={current_metrics['OOB_R2']:.4f}")
+                else:
+                    print("OOB测试: 无OOB样本")
+
+        # 计算整体OOB误差
+        valid_mask = oob_counts > 0
+        if np.sum(valid_mask) > 0:
+            # 对每个样本，计算其OOB预测的平均值
+            oob_pred_mean = np.nanmean(oob_predictions[valid_mask], axis=1)
+            y_oob_true = y[valid_mask]
+
+            # 计算OOB评估指标
+            self.oob_mae = mean_absolute_error(y_oob_true, oob_pred_mean)
+            self.oob_mse = mean_squared_error(y_oob_true, oob_pred_mean)
+            self.oob_rmse = np.sqrt(self.oob_mse)
+            self.oob_r2 = r2_score(y_oob_true, oob_pred_mean)
+
+            print(f"\n=== 屈服强度(σy) Out-of-Bag (OOB) 评估结果 ===")
+            print(f"OOB样本覆盖率: {np.sum(valid_mask)/len(X):.1%}")
+            print(f"OOB MAE:  {self.oob_mae:.4f}")
+            print(f"OOB RMSE: {self.oob_rmse:.4f}")
+            print(f"OOB R²:   {self.oob_r2:.4f}")
+
+            # 存储OOB结果用于可视化
+            self.oob_true = y_oob_true
+            self.oob_pred = oob_pred_mean
+        else:
+            print("警告: 没有足够的OOB样本进行评估")
+            self.oob_mae = self.oob_mse = self.oob_rmse = self.oob_r2 = None
+            self.oob_true = self.oob_pred = None
+
+        # 保存指标到Excel
+        if save_excel:
+            self.save_metrics_to_excel(excel_path)
+
+        # 打印统计摘要
+        self.print_metrics_summary()
+
+        self.is_fitted = True
+        print(f"\n完成训练{len(self.models)}个屈服强度(σy)预测模型")
+
+    def save_metrics_to_excel(self, excel_path):
+        """将所有模型的指标保存到Excel文件"""
+        try:
+            df_metrics = pd.DataFrame(self.model_metrics)
+
+            # 创建多个工作表
+            with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                # 保存所有模型的详细指标
+                df_metrics.to_excel(writer, sheet_name='All_Models_YieldStrength', index=False)
+
+                # 保存统计摘要
+                summary_stats = df_metrics.describe()
+                summary_stats.to_excel(writer, sheet_name='Summary_Stats_σy')
+
+                # 保存性能最好的前10个模型
+                best_models_oob = df_metrics.dropna(subset=['OOB_R2']).nlargest(10, 'OOB_R2')
+                best_models_oob.to_excel(writer, sheet_name='Top10_OOB_R2_σy', index=False)
+
+                # 保存性能最差的10个模型
+                worst_models_oob = df_metrics.dropna(subset=['OOB_R2']).nsmallest(10, 'OOB_R2')
+                worst_models_oob.to_excel(writer, sheet_name='Bottom10_OOB_R2_σy', index=False)
+
+            print(f"\n屈服强度(σy)模型指标已保存到: {excel_path}")
+        except Exception as e:
+            print(f"保存Excel文件时出错: {e}")
+
+    def print_metrics_summary(self):
+        """打印指标统计摘要"""
+        if not self.model_metrics:
+            print("没有屈服强度(σy)模型指标可显示")
+            return
+
+        df_metrics = pd.DataFrame(self.model_metrics)
+
+        print(f"\n=== 屈服强度(σy)模型性能统计摘要 ===")
+        print(f"总模型数量: {len(df_metrics)}")
+
+        # 训练集性能统计
+        print(f"\n训练集性能:")
+        print(f"平均MAE: {df_metrics['Train_MAE'].mean():.4f} ± {df_metrics['Train_MAE'].std():.4f}")
+        print(f"平均RMSE: {df_metrics['Train_RMSE'].mean():.4f} ± {df_metrics['Train_RMSE'].std():.4f}")
+        print(f"平均R²: {df_metrics['Train_R2'].mean():.4f} ± {df_metrics['Train_R2'].std():.4f}")
+
+        # OOB性能统计
+        oob_data = df_metrics.dropna(subset=['OOB_R2'])
+        if len(oob_data) > 0:
+            print(f"\nOut-of-Bag测试性能 (基于{len(oob_data)}个有效模型):")
+            print(f"平均MAE: {oob_data['OOB_MAE'].mean():.4f} ± {oob_data['OOB_MAE'].std():.4f}")
+            print(f"平均RMSE: {oob_data['OOB_RMSE'].mean():.4f} ± {oob_data['OOB_RMSE'].std():.4f}")
+            print(f"平均R²: {oob_data['OOB_R2'].mean():.4f} ± {oob_data['OOB_R2'].std():.4f}")
+
+            print(f"\n最佳OOB性能:")
+            best_idx = oob_data['OOB_R2'].idxmax()
+            best_model = df_metrics.iloc[best_idx]
+            print(f"模型 {best_model['Model']}: R²={best_model['OOB_R2']:.4f}, MAE={best_model['OOB_MAE']:.4f}, RMSE={best_model['OOB_RMSE']:.4f}")
+
+    def predict(self, X, return_std=False):
+        """预测屈服强度并可选择返回标准差"""
+        if not self.is_fitted:
+            raise ValueError("屈服强度(σy)模型尚未训练，请先调用fit方法")
+
+        X = np.array(X)
+        predictions = []
+
+        for i, (model, scaler_X) in enumerate(zip(self.models, self.scalers_X)):
+            X_scaled = scaler_X.transform(X)
+            y_pred = model.predict(X_scaled)  # 直接使用预测结果，无需反标准化
+            predictions.append(y_pred)
+
+        predictions = np.array(predictions)
+        mean_pred = np.mean(predictions, axis=0)
+
+        if return_std:
+            std_pred = np.std(predictions, axis=0)
+            return mean_pred, std_pred
+
+        return mean_pred
+
+    def predict_with_interval(self, X, confidence=0.95):
+        """预测屈服强度并返回置信区间"""
+        if not self.is_fitted:
+            raise ValueError("屈服强度(σy)模型尚未训练，请先调用fit方法")
+
+        X = np.array(X)
+        predictions = []
+
+        for model, scaler_X in zip(self.models, self.scalers_X):
+            X_scaled = scaler_X.transform(X)
+            y_pred = model.predict(X_scaled)  # 直接使用预测结果，无需反标准化
+            predictions.append(y_pred)
+
+        predictions = np.array(predictions)
+        mean_pred = np.mean(predictions, axis=0)
+
+        # 计算置信区间
+        alpha = 1 - confidence
+        lower_percentile = (alpha / 2) * 100
+        upper_percentile = (1 - alpha / 2) * 100
+
+        lower_bound = np.percentile(predictions, lower_percentile, axis=0)
+        upper_bound = np.percentile(predictions, upper_percentile, axis=0)
+
+        return mean_pred, lower_bound, upper_bound
+
+def plot_metrics_analysis(ensemble):
+    """绘制屈服强度模型指标分析图"""
+    if not ensemble.model_metrics:
+        print("没有屈服强度(σy)模型指标可绘制")
+        return
+
+    df_metrics = pd.DataFrame(ensemble.model_metrics)
+    oob_data = df_metrics.dropna(subset=['OOB_R2'])
+
+    plt.figure(figsize=(20, 12))
+
+    # 训练集R²分布
+    plt.subplot(2, 4, 1)
+    plt.hist(df_metrics['Train_R2'], bins=50, alpha=0.7, color='blue', edgecolor='black')
+    plt.xlabel('Train R²')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Train R² (Yield Strength σy)')
+    plt.grid(True, alpha=0.3)
+
+    # OOB R²分布
+    plt.subplot(2, 4, 2)
+    if len(oob_data) > 0:
+        plt.hist(oob_data['OOB_R2'], bins=50, alpha=0.7, color='red', edgecolor='black')
+        plt.xlabel('OOB R²')
+        plt.ylabel('Frequency')
+        plt.title('Distribution of OOB R² (Yield Strength σy)')
+        plt.grid(True, alpha=0.3)
+
+    # 训练集vs OOB R²散点图
+    plt.subplot(2, 4, 3)
+    if len(oob_data) > 0:
+        plt.scatter(oob_data['Train_R2'], oob_data['OOB_R2'], alpha=0.6, color='green')
+        plt.xlabel('Train R²')
+        plt.ylabel('OOB R²')
+        plt.title('Train vs OOB R² (Yield Strength σy)')
+        plt.plot([0, 1], [0, 1], 'r--', alpha=0.8)
+        plt.grid(True, alpha=0.3)
+
+    # RMSE对比
+    plt.subplot(2, 4, 4)
+    if len(oob_data) > 0:
+        plt.scatter(oob_data['Train_RMSE'], oob_data['OOB_RMSE'], alpha=0.6, color='purple')
+        plt.xlabel('Train RMSE')
+        plt.ylabel('OOB RMSE')
+        plt.title('Train vs OOB RMSE (Yield Strength σy)')
+        plt.grid(True, alpha=0.3)
+
+    # R²随模型序号变化
+    plt.subplot(2, 4, 5)
+    plt.plot(df_metrics['Model'], df_metrics['Train_R2'], 'b-', alpha=0.7, label='Train R²')
+    if len(oob_data) > 0:
+        plt.plot(oob_data['Model'], oob_data['OOB_R2'], 'r-', alpha=0.7, label='OOB R²')
+    plt.xlabel('Model Number')
+    plt.ylabel('R²')
+    plt.title('R² vs Model Number (Yield Strength σy)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # 样本数分布
+    plt.subplot(2, 4, 6)
+    plt.hist(df_metrics['Train_Samples'], bins=30, alpha=0.7, color='orange', edgecolor='black')
+    plt.xlabel('Training Samples')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Training Sample Counts')
+    plt.grid(True, alpha=0.3)
+
+    # OOB样本数分布
+    plt.subplot(2, 4, 7)
+    oob_samples = df_metrics[df_metrics['OOB_Samples'] > 0]['OOB_Samples']
+    if len(oob_samples) > 0:
+        plt.hist(oob_samples, bins=30, alpha=0.7, color='brown', edgecolor='black')
+        plt.xlabel('OOB Samples')
+        plt.ylabel('Frequency')
+        plt.title('Distribution of OOB Sample Counts')
+        plt.grid(True, alpha=0.3)
+
+    # 性能箱线图
+    plt.subplot(2, 4, 8)
+    if len(oob_data) > 0:
+        data_to_plot = [df_metrics['Train_R2'], oob_data['OOB_R2']]
+        plt.boxplot(data_to_plot, labels=['Train R²', 'OOB R²'])
+        plt.ylabel('R²')
+        plt.title('R² Performance Comparison (Yield Strength σy)')
+        plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+def load_and_preprocess_data(file_path):
+    """加载和预处理屈服强度数据"""
+    print("正在加载屈服强度(σy)训练数据...")
+
+    # 读取Excel文件
+    df = pd.read_excel(file_path)
+    print(f"原始数据形状: {df.shape}")
+
+    # 删除包含缺失值的行
+    df_clean = df.dropna()
+    print(f"清理后数据形状: {df_clean.shape}")
+
+    # 只保留数值列
+    numeric_cols = df_clean.select_dtypes(include=[np.number]).columns.tolist()
+    df_numeric = df_clean[numeric_cols]
+
+    print(f"数值列: {numeric_cols}")
+
+    # 识别屈服强度目标变量（假设是包含"屈服"或"强度"的列，或最后一列）
+    target_col = None
+    for col in df_numeric.columns:
+        if '屈服' in str(col) or '强度' in str(col) or 'yield' in str(col).lower():
+            target_col = col
+            break
+
+    if target_col is None:
+        target_col = df_numeric.columns[-1]
+        print(f"未找到明确的屈服强度目标列，使用最后一列作为目标: {target_col}")
+    else:
+        print(f"识别的屈服强度目标列: {target_col}")
+
+    # 分离特征和目标
+    feature_cols = [col for col in df_numeric.columns if col != target_col]
+    X = df_numeric[feature_cols].values
+    y = df_numeric[target_col].values
+
+    print(f"特征数量: {len(feature_cols)}")
+    print(f"特征列: {feature_cols}")
+    print(f"样本数量: {len(y)}")
+    print(f"屈服强度(σy)范围: {y.min():.2f} ~ {y.max():.2f}")
+
+    return X, y, feature_cols, target_col
+
+def evaluate_model(y_true, y_pred, model_name="Yield Strength σy Model"):
+    """评估屈服强度模型性能"""
+    mae = mean_absolute_error(y_true, y_pred)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_true, y_pred)
+
+    print(f"\n{model_name} 性能评估:")
+    print(f"MAE:  {mae:.4f}")
+    print(f"MSE:  {mse:.4f}")
+    print(f"RMSE: {rmse:.4f}")
+    print(f"R²:   {r2:.4f}")
+
+    return {"MAE": mae, "MSE": mse, "RMSE": rmse, "R2": r2}
+
+def plot_results(y_true, y_pred, lower_bound=None, upper_bound=None, title="SVR Bootstrap Results - Yield Strength (σy)"):
+    """绘制屈服强度预测结果图"""
+    plt.figure(figsize=(15, 5))
+
+    # 预测vs实际值
+    plt.subplot(1, 3, 1)
+    plt.scatter(y_true, y_pred, alpha=0.6, color='blue')
+
+    # 添加置信区间
+    if lower_bound is not None and upper_bound is not None:
+        plt.errorbar(y_true, y_pred,
+                    yerr=[y_pred - lower_bound, upper_bound - y_pred],
+                    fmt='o', alpha=0.3, capsize=2, color='blue')
+
+    # 完美预测线
+    min_val = min(y_true.min(), y_pred.min())
+    max_val = max(y_true.max(), y_pred.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='Perfect Prediction')
+
+    plt.xlabel('Actual Yield Strength (σy)')
+    plt.ylabel('Predicted Yield Strength (σy)')
+    plt.title('Predicted vs Actual Yield Strength')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # 残差图
+    plt.subplot(1, 3, 2)
+    residuals = y_true - y_pred
+    plt.scatter(y_pred, residuals, alpha=0.6, color='green')
+    plt.axhline(y=0, color='r', linestyle='--')
+    plt.xlabel('Predicted Yield Strength (σy)')
+    plt.ylabel('Residuals')
+    plt.title('Residual Plot')
+    plt.grid(True, alpha=0.3)
+
+    # 残差分布
+    plt.subplot(1, 3, 3)
+    plt.hist(residuals, bins=30, alpha=0.7, color='orange', edgecolor='black')
+    plt.xlabel('Residuals')
+    plt.ylabel('Frequency')
+    plt.title('Residual Distribution')
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.suptitle(title, y=1.02, fontsize=16)
+    plt.show()
+
+def plot_oob_results(ensemble):
+    """绘制屈服强度OOB结果"""
+    if ensemble.oob_true is None or ensemble.oob_pred is None:
+        print("没有屈服强度(σy) OOB结果可显示")
+        return
+
+    plot_results(ensemble.oob_true, ensemble.oob_pred,
+                title="Out-of-Bag (OOB) Evaluation Results - Yield Strength (σy)")
+
+def main():
+    """主函数"""
+    # 文件路径
+    file_path = '/content/屈服强度特征最终版.xlsx'
+
+    try:
+        # 加载数据
+        X, y, feature_cols, target_col = load_and_preprocess_data(file_path)
+
+        print(f"\n屈服强度(σy)数据集大小: {X.shape[0]} 样本, {X.shape[1]} 特征")
+        print("使用Bootstrap Out-of-Bag方法进行屈服强度模型训练和评估")
+        print("每次Bootstrap大约63.2%的样本用于训练，剩余36.8%用于测试")
+        print("注意：此版本不对目标变量屈服强度(σy)进行标准化")
+
+        # 创建和训练Bootstrap集成模型
+        # 注意：由于不标准化y，可能需要调整C和epsilon参数
+        ensemble = SVRBootstrapEnsemble(
+            n_estimators=1000,
+            C=900.81,  # 可能需要根据屈服强度的尺度调整
+            epsilon=3.8196,  # 可能需要根据屈服强度的尺度调整
+            random_state=42
+        )
+
+        # 训练模型（包含OOB评估），每50个模型显示一次详情，保存指标到Excel
+        ensemble.fit(X, y, show_progress=50, save_excel=True, excel_path="bootstrap_svr_yield_strength_σy_metrics.xlsx")
+
+        # 绘制OOB评估结果
+        if ensemble.oob_true is not None:
+            plot_oob_results(ensemble)
+
+        # 绘制模型指标分析图
+        plot_metrics_analysis(ensemble)
+
+        # 演示对新数据的预测（使用部分训练数据作为示例）
+        print(f"\n=== 屈服强度(σy)预测示例 ===")
+        sample_indices = np.random.choice(len(X), size=min(10, len(X)), replace=False)
+        X_sample = X[sample_indices]
+        y_sample = y[sample_indices]
+
+        # 进行预测
+        y_pred_sample, lower_sample, upper_sample = ensemble.predict_with_interval(X_sample, confidence=0.95)
+
+        print("样本\t实际σy\t预测σy\t95%置信区间")
+        print("-" * 60)
+        for i, idx in enumerate(sample_indices):
+            print(f"{idx}\t{y_sample[i]:.2f}\t{y_pred_sample[i]:.2f}\t[{lower_sample[i]:.2f}, {upper_sample[i]:.2f}]")
+
+        print(f"\n屈服强度(σy)特征信息:")
+        print(f"特征数量: {len(feature_cols)}")
+        print(f"目标变量: {target_col}")
+
+        return ensemble
+
+    except Exception as e:
+        print(f"错误: {e}")
+        return None
+
+if __name__ == "__main__":
+    # 运行主函数
+    ensemble_model = main()
+
+    if ensemble_model is not None:
+        print("\n=== Bootstrap SVR屈服强度(σy)集成模型训练完成 ===")
+        print(f"成功训练了{len(ensemble_model.models)}个SVR屈服强度预测模型")
+        print("可以使用 ensemble_model.predict() 进行新的屈服强度预测")
+        print("所有屈服强度模型的详细指标已保存到 'bootstrap_svr_yield_strength_σy_metrics.xlsx'")
+        print("\n重要提醒：由于目标变量屈服强度(σy)未标准化，可能需要根据数据的实际尺度调整C和epsilon参数以获得最佳性能")
+    else:
+        print("屈服强度(σy)模型训练失败，请检查数据和代码")
