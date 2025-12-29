@@ -1,0 +1,179 @@
+import pandas as pd
+import numpy as np
+import joblib
+from sklearn.preprocessing import StandardScaler
+import os
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+
+# AdvancedNN模型定义 (需要与之前训练的模型结构保持一致)
+class AdvancedNN(nn.Module):
+    def __init__(self, input_size, n_hidden, num_layers, dropout_prob):
+        super().__init__()
+        layers = []
+        for i in range(num_layers):
+            layers.append(nn.Linear(input_size if i == 0 else n_hidden, n_hidden))
+            layers.append(nn.LayerNorm(n_hidden))  # 将BatchNorm改为LayerNorm
+            layers.append(nn.LeakyReLU())
+            layers.append(nn.Dropout(dropout_prob))
+        layers.append(nn.Linear(n_hidden, 1))
+        self.model = nn.Sequential(*layers)
+        self._initialize_weights()
+
+    def forward(self, x):
+        return self.model(x)
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu')
+                nn.init.constant_(m.bias, 0)
+
+# --------- 读取数据 ---------
+file_path = r'/content/屈服强度第二次迭代.xlsx'
+data = pd.read_excel(file_path)
+# 删除包含空值的行
+data = data.dropna()
+
+# --------- 特征 & 目标 ---------
+X = data.iloc[:, :-1]  # 特征
+y = data.iloc[:, -1]   # 目标值
+
+# --------- 数据归一化 ---------
+scaler = StandardScaler()  # 使用 StandardScaler 进行标准化
+X_scaled = scaler.fit_transform(X)  # 对 X 进行标准化
+
+# --------- 加载模型和对应超参数 ---------
+predictions = []
+
+# 添加安全的全局类型 - 解决PyTorch 2.6加载问题
+try:
+    # 导入必要的模块
+    import torch.serialization
+    import numpy
+
+    # 为numpy.scalar类型添加安全加载
+    torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
+except Exception as e:
+    print(f"注意: 无法添加安全全局变量: {e}")
+
+# 加载模型（使用 numpy 数组进行训练）
+for seed in [39, 40,41,42,43]:  # 使用前面保存的种子39和40
+    print(f"\n----- 加载种子 {seed} 的模型 -----")
+    for model_num in range(1, 11):  # 从1到10，与前面保存的模型对应
+        # 加载 ANN 模型
+        model_filename_ann = f"/content/drive/MyDrive/高熵合金屈服强度总/高熵合金屈服强度2/Enhanced_model_seed{seed}_top{model_num}.pth"
+
+        # 检查模型文件是否存在
+        if os.path.exists(model_filename_ann):
+            try:
+                # 尝试加载模型
+                try:
+                    # 首先尝试使用安全类型加载
+                    saved_data = torch.load(model_filename_ann)
+                except Exception:
+                    # 如果失败，使用weights_only=False加载
+                    print(f"使用weights_only=False加载模型 seed{seed}_top{model_num}")
+                    saved_data = torch.load(model_filename_ann, weights_only=False)
+
+                # 重建模型
+                model = AdvancedNN(
+                    input_size=X_scaled.shape[1],
+                    n_hidden=int(saved_data['params']['n_hidden']),
+                    num_layers=int(saved_data['params']['num_layers']),
+                    dropout_prob=saved_data['params']['dropout_prob']
+                )
+
+                # 加载权重
+                model.load_state_dict(saved_data['model_state'])
+
+                # 进行预测
+                model.eval()
+                with torch.no_grad():
+                    X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
+                    prediction_ann = model(X_tensor).numpy().flatten()
+                    predictions.append(prediction_ann)
+
+                print(f"成功加载和预测模型 seed{seed}_top{model_num}")
+            except Exception as e:
+                print(f"加载模型 seed{seed}_top{model_num} 时出错: {e}")
+        else:
+            print(f"模型文件 seed{seed}_top{model_num} 不存在!")
+
+    # 加载SVR模型部分保持不变
+    for model_num in range(10):  # 每个种子下10个模型
+        # 加载 SVR 模型
+        model_filename_svr = os.path.join('/content/drive/MyDrive/高熵合金屈服强度总/高熵合金屈服强度2', f"SVR_model_seed_{seed}_model_{model_num + 1}.joblib")
+
+        # 检查 SVR 模型文件是否存在
+        if os.path.exists(model_filename_svr):
+            # 加载 SVR 模型
+            model_svr = joblib.load(model_filename_svr)
+
+            # 进行预测（SVR 模型）
+            prediction_svr = model_svr.predict(X_scaled)
+            predictions.append(prediction_svr)
+        else:
+            print(f"SVR模型文件 seed{seed}_model_{model_num + 1} 不存在!")
+
+# 将所有模型的预测结果堆叠到一个numpy数组
+predictions = np.array(predictions)
+print(f"成功加载了 {len(predictions)} 个模型进行集成预测")
+
+# --------- 计算均值和不确定性（标准差） ---------
+mean_prediction = predictions.mean(axis=0)
+uncertainty = predictions.std(axis=0)
+
+# --------- 输出结果 ---------
+print("Predictions Mean (Average):")
+print(mean_prediction[:5])  # 只显示前5个预测值
+
+print("\nPrediction Uncertainty (Standard Deviation):")
+print(uncertainty[:5])  # 只显示前5个不确定性值
+
+# --------- 计算整体性能指标 ---------
+from sklearn.metrics import mean_squared_error, r2_score
+rmse = np.sqrt(mean_squared_error(y, mean_prediction))
+r2 = r2_score(y, mean_prediction)
+print(f"\n整体性能 - RMSE: {rmse:.4f}, R²: {r2:.4f}")
+
+# --------- 保存结果到文件 ---------
+result_df = pd.DataFrame({
+    'Actual Values': y,  # 添加真实值列
+    'Predicted Mean': mean_prediction,
+    'Prediction Uncertainty': uncertainty
+})
+
+result_filename = '/content/drive/MyDrive/高熵合金数据/ensemble_predictions_with_actual.csv'
+result_df.to_csv(result_filename, index=False)
+
+print(f"集成预测结果、不确定性和真实值已保存到: {result_filename}")
+
+# --------- 可视化 ---------
+# 绘制实际值 vs 预测值，并添加不确定性（误差条）
+plt.figure(figsize=(10, 6))
+
+# 绘制真实值 vs 预测值
+plt.scatter(y, mean_prediction, color='blue', label='Predictions vs Actual', marker='o')
+
+# 添加误差条（表示不确定性）
+plt.errorbar(y, mean_prediction, yerr=uncertainty, fmt='o', color='red', label='Uncertainty (Standard Deviation)')
+
+# 添加对角线，表示完美预测（真实值 = 预测值）
+plt.plot([min(y), max(y)], [min(y), max(y)], color='black', linestyle='--', label='y = x')
+
+# 添加性能指标
+plt.text(0.05, 0.95, f"RMSE: {rmse:.2f}\nR²: {r2:.4f}",
+         transform=plt.gca().transAxes, va='top')
+
+# 添加标题和标签
+plt.title('Predictions vs Actual with Uncertainty')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.legend()
+
+# 显示图表
+plt.tight_layout()
+plt.savefig('/content/drive/MyDrive/高熵合金数据/ensemble_predictions_visualization.png')
+plt.show()
