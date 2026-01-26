@@ -9,47 +9,32 @@ from sklearn.model_selection import KFold, cross_val_predict
 from bayes_opt import BayesianOptimization
 from deap import base, creator, tools, algorithms
 
-# --------- 读取数据 ---------
-file_path = r'/content/屈服强度特征PCC筛选.xlsx'
+file_path = r'/content/yield_strength_pcc.xlsx'
 data = pd.read_excel(file_path)
 
-# --------- 特征 & 目标 ---------
-X = data.iloc[:, :-1]  # 特征列
-y = data.iloc[:, -1]    # 目标变量
+X = data.iloc[:, :-1]
+y = data.iloc[:, -1]
 
-# --------- 数据归一化 ---------
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
 
-# 获取最佳超参数
 best_C = 900.81
 best_epsilon = 3.8196
-print(f"Initial Best Parameters: C = {best_C}, epsilon = {best_epsilon}")
 
-# --------- 自定义分组函数 ---------
 def custom_group_kfold(X, y, group_labels, n_splits=5, random_state=42):
-    """ 按组均匀分配样本到每个折叠中 """
     unique_groups = np.unique(group_labels)
     groups = {group: np.where(group_labels == group)[0] for group in unique_groups}
-
-    # 创建 KFold
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     fold_indices = {i: [] for i in range(n_splits)}
-
-    # 按照折叠进行分配
     for group in unique_groups:
         group_samples = groups[group]
-        # 在每个折叠中均匀分配该组的样本
         for fold, (train_idx, test_idx) in enumerate(kf.split(group_samples)):
             fold_indices[fold].extend(group_samples[test_idx])
-
-    # 确保每个折叠的样本分布均匀
     for fold in fold_indices:
         fold_indices[fold] = np.array(fold_indices[fold])
     return fold_indices
 
-# Define group labels
 group_sizes = [15,6,12,5,11,11,7,5,9,5,7,11,7]
 group_labels = []
 current_group = 1
@@ -58,156 +43,112 @@ for size in group_sizes:
     current_group += 1
 group_labels = np.array(group_labels)
 
-# --------- 遗传算法参数设置 ---------
-# 初始化遗传算法的工具
-creator.create("FitnessMinMax", base.Fitness, weights=(-1.0, 1.0))  # 最小化RMSE，最大化R²
+creator.create("FitnessMinMax", base.Fitness, weights=(-1.0, 1.0))
 creator.create("Individual", list, fitness=creator.FitnessMinMax)
 
-# 创建个体的生成函数（表示选择特征）
 def create_individual():
-    """生成一个个体，前13个特征固定，后面的特征通过遗传算法筛选"""
-    # 固定前13个特征为 1
     individual = [1] * 13
-    # 后面的特征随机选择 0 或 1
     individual.extend([np.random.randint(0, 2) for _ in range(len(X_scaled.columns) - 13)])
     return individual
 
-# 适应度函数 - 修改为与前向选择完全一致的评估方式
 def evaluate(individual):
-    """评估一个个体的适应度，使用与前向选择相同的评估方式"""
-    # 固定前13个特征
     selected_features = [X_scaled.columns[i] for i in range(13) if individual[i] == 1]
-
-    # 后续特征根据遗传算法选择
     selected_features += [X_scaled.columns[i] for i in range(13, len(individual)) if individual[i] == 1]
-
-    if len(selected_features) == 0:  # 如果没有选择任何特征，返回一个较差的适应度
+    
+    if len(selected_features) == 0:
         return 999999, 0.0
-
+    
     X_selected = X_scaled[selected_features]
-
-    # 使用与前向选择完全相同的评估方式：10次5折交叉验证，seeds从40到49
     all_rmse_results = []
     all_r2_results = []
-
-    for seed in range(40, 50):  # seeds: 40, 41, 42, ..., 49 (共10次)
+    
+    for seed in range(40, 50):
         fold_indices = custom_group_kfold(X_selected, y, group_labels, n_splits=5, random_state=seed)
-
         for fold, test_idx in fold_indices.items():
             train_idx = np.setdiff1d(np.arange(len(X_selected)), test_idx)
             X_train, X_test = X_selected.iloc[train_idx], X_selected.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
-            # 训练模型
             model = SVR(C=best_C, epsilon=best_epsilon, kernel='rbf')
             model.fit(X_train, y_train)
             y_pred = model.predict(X_test)
-
-            # 计算性能指标
             rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             r2 = r2_score(y_test, y_pred)
-
             all_rmse_results.append(rmse)
             all_r2_results.append(r2)
-
-    # 返回50个结果(10个seed × 5折)的均值
+    
     avg_rmse = np.mean(all_rmse_results)
     avg_r2 = np.mean(all_r2_results)
-
     return avg_rmse, avg_r2
 
-# 变异操作，保证前13个特征保持固定不变，后续特征进行变异
 def mutate(individual):
-    """变异操作，保证前13个特征保持固定不变，后续特征进行变异"""
-    for i in range(13, len(individual)):  # 只对第13个特征后的进行变异
-        if np.random.rand() < 0.1:  # 变异概率
-            individual[i] = 1 - individual[i]  # 翻转特征的选择状态
+    for i in range(13, len(individual)):
+        if np.random.rand() < 0.1:
+            individual[i] = 1 - individual[i]
     return individual,
 
-# 获取额外特征的函数
 def get_additional_features(individual):
-    """获取除前13个特征外被选择的额外特征"""
     additional_features = []
     for i in range(13, len(individual)):
         if individual[i] == 1:
             additional_features.append(X_scaled.columns[i])
     return additional_features
 
-# 遗传算法的操作
 toolbox = base.Toolbox()
 toolbox.register("individual", tools.initIterate, creator.Individual, create_individual)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-toolbox.register("mate", tools.cxTwoPoint)  # 交叉操作
-toolbox.register("mutate", mutate)  # 使用新的变异操作
-toolbox.register("select", tools.selTournament, tournsize=3)  # 选择操作
+toolbox.register("mate", tools.cxTwoPoint)
+toolbox.register("mutate", mutate)
+toolbox.register("select", tools.selTournament, tournsize=3)
 toolbox.register("evaluate", evaluate)
 
-# 创建一个DataFrame来存储每代的结果
 results_df = pd.DataFrame(columns=['Generation', 'Best_RMSE', 'Best_R2', 'Avg_RMSE', 'Avg_R2',
                                    'Selected_Features', 'Num_Features', 'Num_Additional_Features',
                                    'Additional_Features', 'Best_Individual'])
 
-# --------- 遗传算法优化过程 ---------
 population = toolbox.population(n=100)
 generations = 50
 best_individual_overall = None
-best_fitness_overall = (float('inf'), -float('inf'))  # (RMSE, R2)
+best_fitness_overall = (float('inf'), -float('inf'))
 
 for gen in range(generations):
-    print(f"Generation {gen}")
-    offspring = toolbox.select(population, len(population))  # 选择操作
-    offspring = list(map(toolbox.clone, offspring))  # 克隆个体
-
-    # 交叉操作
+    offspring = toolbox.select(population, len(population))
+    offspring = list(map(toolbox.clone, offspring))
+    
     for child1, child2 in zip(offspring[::2], offspring[1::2]):
         if np.random.rand() < 0.7:
             toolbox.mate(child1, child2)
             del child1.fitness.values
             del child2.fitness.values
-
-    # 变异操作
+    
     for mutant in offspring:
         if np.random.rand() < 0.2:
-            toolbox.mutate(mutant)  # 使用新的变异操作
+            toolbox.mutate(mutant)
             del mutant.fitness.values
-
-    # 评估适应度
+    
     invalid_individuals = [ind for ind in offspring if not ind.fitness.valid]
     fitnesses = list(map(toolbox.evaluate, invalid_individuals))
     for ind, fit in zip(invalid_individuals, fitnesses):
         ind.fitness.values = fit
-
-    # 替换种群
+    
     population[:] = offspring
-
-    # 计算种群的平均适应度
+    
     rmse_values = [ind.fitness.values[0] for ind in population]
     r2_values = [ind.fitness.values[1] for ind in population]
     avg_rmse = np.mean(rmse_values)
     avg_r2 = np.mean(r2_values)
-
-    # 获取最好的个体
+    
     best_individual = tools.selBest(population, 1)[0]
     best_rmse, best_r2 = best_individual.fitness.values
-
-    # 更新全局最优个体
+    
     if best_rmse < best_fitness_overall[0] and best_r2 > best_fitness_overall[1]:
         best_individual_overall = best_individual.copy()
         best_fitness_overall = (best_rmse, best_r2)
-
-    print(f"Best Individual: {best_individual}")
-    print(f"Fitness (RMSE): {best_rmse}, R²: {best_r2}")
-
-    # 获取选择的特征和额外特征
+    
     selected_features = [X_scaled.columns[i] for i in range(len(best_individual)) if best_individual[i] == 1]
     additional_features = get_additional_features(best_individual)
     num_features = len(selected_features)
     num_additional_features = len(additional_features)
-
-    print(f"总特征数: {num_features}, 额外特征数(不含前13个): {num_additional_features}")
-    print(f"额外特征列表: {additional_features}")
-
-    # 创建新行并添加到DataFrame
+    
     new_row = pd.DataFrame({
         'Generation': [gen],
         'Best_RMSE': [best_rmse],
@@ -221,34 +162,16 @@ for gen in range(generations):
         'Best_Individual': [str(best_individual)]
     })
     results_df = pd.concat([results_df, new_row], ignore_index=True)
-
-    # 每5代保存一次Excel，防止程序崩溃导致数据丢失
+    
     if gen % 5 == 0 or gen == generations - 1:
-        results_df.to_excel(f'genetic_algorithm_results_gen_{gen}.xlsx', index=False)
+        results_df.to_excel(f'ga_results_gen_{gen}.xlsx', index=False)
 
-# 最终保存结果
-results_df.to_excel('genetic_algorithm_results_final.xlsx', index=False)
+results_df.to_excel('ga_results_final.xlsx', index=False)
 
-# 输出全局最佳特征选择结果
 if best_individual_overall is not None:
     best_rmse, best_r2 = best_fitness_overall
     selected_features = [X_scaled.columns[i] for i in range(len(best_individual_overall)) if best_individual_overall[i] == 1]
     additional_features = get_additional_features(best_individual_overall)
-
-    print("\n----- 全局最佳结果 -----")
-    print(f"最佳个体: {best_individual_overall}")
-    print(f"适应度 (RMSE): {best_rmse}, R²: {best_r2}")
-    print(f"选择的特征数量: {len(selected_features)}")
-    print(f"额外特征数量(不含前13个): {len(additional_features)}")
-    print(f"选择的所有特征: {selected_features}")
-    print(f"额外特征列表: {additional_features}")
 else:
     selected_features = [X_scaled.columns[i] for i in range(len(best_individual)) if best_individual[i] == 1]
     additional_features = get_additional_features(best_individual)
-
-    print(f"最终选择的所有特征: {selected_features}")
-    print(f"额外特征数量(不含前13个): {len(additional_features)}")
-    print(f"额外特征列表: {additional_features}")
-
-# 输出前13个固定特征的名称
-print(f"\n前13个固定特征: {list(X_scaled.columns[:13])}")
