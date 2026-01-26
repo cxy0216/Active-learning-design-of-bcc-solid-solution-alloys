@@ -5,14 +5,13 @@ import numpy as np
 from sklearn.model_selection import KFold, cross_val_predict
 from sklearn.metrics import mean_squared_error, r2_score
 from xgboost import XGBRegressor
+import matplotlib.pyplot as plt
 import os
 import random
 import torch
 
-# 配置日志，输出到控制台
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 定义设置随机种子的函数
 def set_seed(seed):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -23,18 +22,14 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# 设置全局随机种子
 set_seed(42)
 
-# --------- 读取数据 ---------
-file_path = r'/content/屈服强度.xlsx'
+file_path = r'/content/yield_strength.xlsx'
 data = pd.read_excel(file_path)
 
-# --------- 特征 & 目标 ---------
 X = data.iloc[:, 1:-1]
 y = data.iloc[:, -1]
 
-# --------- 贝叶斯优化目标函数 ---------
 def train_model(n_estimators, learning_rate, max_depth, subsample, colsample_bytree, gamma, min_child_weight, reg_alpha, reg_lambda):
     params = {
         'n_estimators': int(round(n_estimators)),
@@ -50,19 +45,13 @@ def train_model(n_estimators, learning_rate, max_depth, subsample, colsample_byt
         'random_state': 42,
         'verbosity': 0
     }
-
     model = XGBRegressor(**params)
-
-    # 10折交叉验证
     kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
     y_pred = cross_val_predict(model, X, y, cv=kf)
-
-    # 计算负的 RMSE 用于贝叶斯优化目标（优化时要最小化负值）
     rmse = np.sqrt(mean_squared_error(y, y_pred))
     r2 = r2_score(y, y_pred)
     return -rmse
 
-# 定义贝叶斯优化的参数范围
 bounds = {
     'n_estimators': (50, 500),
     'learning_rate': (0.001, 0.5),
@@ -75,61 +64,45 @@ bounds = {
     'reg_lambda': (0, 2)
 }
 
-# 贝叶斯优化对象
 optimizer = BayesianOptimization(
     f=train_model,
     pbounds=bounds,
     random_state=1,
 )
 
-# 贝叶斯优化过程
 optimizer.maximize(init_points=20, n_iter=100)
 
-# 输出最佳结果（不包含贝叶斯优化的对象信息）
-print("Best Parameters:", optimizer.max['params'])
-print(f"Best RMSE: {-optimizer.max['target']:.4f}")
-
-# 将优化结果保存到 Excel
 results_df = pd.DataFrame([{
     'target': -res['target'],
     **res['params']
 } for res in optimizer.res])
-# 按 target 降序排列
+
 results_df = results_df.sort_values(by='target', ascending=False)
-file_path = 'XGBoost.xlsx'
-results_df.to_excel(file_path, index=False)
-print(f"Optimization results saved to: {file_path}")
+results_df.to_excel('XGBoost_optimization_results.xlsx', index=False)
 
 best_params = {
-    'n_estimators': int(round(optimizer.max['params']['n_estimators'])),  # 转换为整数
-    'learning_rate': optimizer.max['params']['learning_rate'],  # 学习率，不需要取整
-    'max_depth': int(round(optimizer.max['params']['max_depth'])),  # 转换为整数
-    'subsample': optimizer.max['params']['subsample'],  # 不需要取整
-    'colsample_bytree': optimizer.max['params']['colsample_bytree'],  # 不需要取整
-    'gamma': optimizer.max['params']['gamma'],  # 不需要取整
-    'min_child_weight': optimizer.max['params']['min_child_weight'],  # 转换为整数
-    'reg_alpha': optimizer.max['params']['reg_alpha'],  # 不需要取整
-    'reg_lambda': optimizer.max['params']['reg_lambda'],  # 不需要取整
-    'objective': 'reg:squarederror',  # 目标函数
-    'random_state': 42,  # 固定随机数种子
-    'verbosity': 0  # 不输出详细信息
+    'n_estimators': int(round(optimizer.max['params']['n_estimators'])),
+    'learning_rate': optimizer.max['params']['learning_rate'],
+    'max_depth': int(round(optimizer.max['params']['max_depth'])),
+    'subsample': optimizer.max['params']['subsample'],
+    'colsample_bytree': optimizer.max['params']['colsample_bytree'],
+    'gamma': optimizer.max['params']['gamma'],
+    'min_child_weight': optimizer.max['params']['min_child_weight'],
+    'reg_alpha': optimizer.max['params']['reg_alpha'],
+    'reg_lambda': optimizer.max['params']['reg_lambda'],
+    'objective': 'reg:squarederror',
+    'random_state': 42,
+    'verbosity': 0
 }
 
-# 创建模型
 model = XGBRegressor(**best_params)
 
-# --------- 5折交叉验证 ---------
 kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
 y_pred = cross_val_predict(model, X, y, cv=kf)
 
-# --------- 性能指标 ---------
 rmse = np.sqrt(mean_squared_error(y, y_pred))
 r2 = r2_score(y, y_pred)
 
-print(f"5-Fold CV RMSE = {rmse:.4f}")
-print(f"5-Fold CV R² = {r2:.4f}")
-
-# --------- 1. 预测值 vs 真实值 ---------
 plt.figure(figsize=(6,6))
 plt.scatter(y, y_pred, alpha=0.7)
 plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--')
