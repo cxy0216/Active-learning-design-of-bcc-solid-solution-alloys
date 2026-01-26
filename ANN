@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 
-file_path = r'/content/屈服强度.xlsx'
+file_path = r'/content/yield strength.xlsx'
 data = pd.read_excel(file_path)
 
 X = data.iloc[:, 1:-1].values
@@ -202,7 +202,6 @@ plt.scatter(y_true_all, y_pred_all, alpha=0.7)
 plt.plot([min(y_true_all), max(y_true_all)], [min(y_true_all), max(y_true_all)], 'r--')
 plt.xlabel("True Yield Strength")
 plt.ylabel("Predicted Yield Strength")
-plt.title("81-Fold CV: Predicted vs True Yield Strength (Neural Network)")
 plt.grid(True)
 plt.tight_layout()
 plt.show()
