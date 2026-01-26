@@ -10,33 +10,24 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.svm import SVR
 from sklearn.preprocessing import StandardScaler
 
-# --------- 读取数据 ---------
-file_path = r'/content/屈服强度特征.xlsx'
+file_path = r'/content/yield_strength_features.xlsx'
 data = pd.read_excel(file_path)
 
-# --------- 特征 & 目标 ---------
 X = data.iloc[:, :-1]
 y = data.iloc[:, -1]
 
-# --------- 数据归一化 ---------
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
 
-# --------- 计算相关系数矩阵 ---------
-# 从第13列开始的特征子集
 data_selected = X.iloc[:, 13:]
 correlation_matrix = data_selected.corr(method='pearson')
 
-# --------- 保存完整相关系数矩阵到Excel ---------
-correlation_matrix.to_excel('Pearson_Correlation_Matrix.xlsx', sheet_name='Correlation_Matrix')
-print("完整相关系数矩阵已保存到 'Pearson_Correlation_Matrix.xlsx'")
+correlation_matrix.to_excel('pearson_correlation_matrix.xlsx', sheet_name='Correlation_Matrix')
 
-# --------- 找出高相关性特征对 ---------
 high_corr_pairs = []
-corr_threshold = 0.9  # 设置相关性阈值
+corr_threshold = 0.9
 
-# 遍历相关矩阵的右上三角
 for i in range(correlation_matrix.shape[0]):
     for j in range(i+1, correlation_matrix.shape[1]):
         if abs(correlation_matrix.iloc[i, j]) > corr_threshold:
@@ -45,44 +36,29 @@ for i in range(correlation_matrix.shape[0]):
             corr_value = correlation_matrix.iloc[i, j]
             high_corr_pairs.append((feature_i, feature_j, corr_value))
 
-print(f"找到 {len(high_corr_pairs)} 对相关性大于 {corr_threshold} 的特征:")
-for pair in high_corr_pairs:
-    print(f"{pair[0]} 和 {pair[1]} 的相关性: {pair[2]:.4f}")
-
-# --------- 保存高相关性特征对到Excel ---------
 if high_corr_pairs:
     high_corr_df = pd.DataFrame(high_corr_pairs, columns=['Feature1', 'Feature2', 'Correlation'])
-    high_corr_df.to_excel('High_Correlation_Pairs.xlsx', index=False, sheet_name='High_Correlation')
-    print(f"高相关性特征对已保存到 'High_Correlation_Pairs.xlsx'")
-else:
-    print("没有找到高相关性特征对")
+    high_corr_df.to_excel('high_correlation_pairs.xlsx', index=False, sheet_name='High_Correlation')
 
-# --------- 创建综合结果Excel文件 ---------
-with pd.ExcelWriter('Pearson_Analysis_Results.xlsx', engine='openpyxl') as writer:
-    # 保存完整相关系数矩阵
+with pd.ExcelWriter('pearson_analysis_results.xlsx', engine='openpyxl') as writer:
     correlation_matrix.to_excel(writer, sheet_name='Correlation_Matrix')
-
-    # 保存高相关性特征对
+    
     if high_corr_pairs:
         high_corr_df.to_excel(writer, sheet_name='High_Correlation_Pairs', index=False)
-
-    # 创建统计摘要
+    
     summary_data = {
         'Statistic': ['Total Features', 'Features Analyzed', 'High Correlation Pairs', 'Correlation Threshold'],
         'Value': [X.shape[1], data_selected.shape[1], len(high_corr_pairs), corr_threshold]
     }
     summary_df = pd.DataFrame(summary_data)
     summary_df.to_excel(writer, sheet_name='Summary', index=False)
-
-    # 保存所有相关系数值的分布统计
+    
     corr_values = []
     for i in range(correlation_matrix.shape[0]):
         for j in range(i+1, correlation_matrix.shape[1]):
             corr_values.append(correlation_matrix.iloc[i, j])
-
-    corr_stats = pd.DataFrame({
-        'Correlation_Values': corr_values
-    })
+    
+    corr_stats = pd.DataFrame({'Correlation_Values': corr_values})
     corr_distribution = pd.DataFrame({
         'Statistic': ['Count', 'Mean', 'Std', 'Min', '25%', '50%', '75%', 'Max'],
         'Value': [
@@ -97,163 +73,76 @@ with pd.ExcelWriter('Pearson_Analysis_Results.xlsx', engine='openpyxl') as write
         ]
     })
     corr_distribution.to_excel(writer, sheet_name='Correlation_Statistics', index=False)
-
-    # 保存所有相关系数值（用于进一步分析）
     corr_stats.to_excel(writer, sheet_name='All_Correlation_Values', index=False)
 
-print("综合分析结果已保存到 'Pearson_Analysis_Results.xlsx'")
-print("包含以下工作表:")
-print("- Correlation_Matrix: 完整相关系数矩阵")
-print("- High_Correlation_Pairs: 高相关性特征对")
-print("- Summary: 分析摘要")
-print("- Correlation_Statistics: 相关系数分布统计")
-print("- All_Correlation_Values: 所有相关系数值")
-
-# --------- 绘制相关性矩阵图 ---------
 def plot_correlation_matrix(correlation_matrix):
-    # 生成掩码矩阵（仅显示右上三角）
     mask = np.triu(np.ones_like(correlation_matrix, dtype=bool))
     correlation_masked = correlation_matrix.where(mask)
-
-    # 设置图形尺寸
     plt.figure(figsize=(14, 12))
     ax = plt.gca()
-
-    # 遍历每个单元格绘制圆形
+    
     for i in range(correlation_matrix.shape[0]):
         for j in range(correlation_matrix.shape[1]):
-            if i <= j:  # 仅处理右上三角
+            if i <= j:
                 value = correlation_masked.iloc[i, j]
                 if not np.isnan(value):
-                    x, y = j + 0.5, i + 0.5  # 圆心坐标
-                    radius = 0.4  # 圆的半径
+                    x, y = j + 0.5, i + 0.5
+                    radius = 0.4
                     abs_value = abs(value)
-
-                    # 绘制背景空心圆
-                    background = Circle(
-                        (x, y), radius,
-                        facecolor='none',
-                        edgecolor='lightgrey',
-                        linewidth=0.5,
-                        alpha=0.5
-                    )
+                    
+                    background = Circle((x, y), radius, facecolor='none', edgecolor='lightgrey', linewidth=0.5, alpha=0.5)
                     ax.add_patch(background)
-
-                    # 根据相关性绘制填充图形
-                    if abs_value >= 0.999:  # 处理 |r|=1 的完整圆
+                    
+                    if abs_value >= 0.999:
                         color = '#d7191c' if value > 0 else '#2b83ba'
-                        full_circle = Circle(
-                            (x, y), radius,
-                            facecolor=color,
-                            edgecolor='w',
-                            alpha=0.8
-                        )
+                        full_circle = Circle((x, y), radius, facecolor=color, edgecolor='w', alpha=0.8)
                         ax.add_patch(full_circle)
                     else:
-                        # 正常填充逻辑
                         if value > 0:
-                            theta = 360 * abs_value  # 正相关填充角度
-                            wedge = Wedge(
-                                (x, y), radius, 90 - theta/2, 90 + theta/2,
-                                facecolor='#d7191c',  # 红色
-                                edgecolor='w',
-                                alpha=0.8
-                            )
+                            theta = 360 * abs_value
+                            wedge = Wedge((x, y), radius, 90 - theta/2, 90 + theta/2, facecolor='#d7191c', edgecolor='w', alpha=0.8)
                         else:
-                            theta = 360 * abs_value  # 负相关填充角度
-                            wedge = Wedge(
-                                (x, y), radius, 270 - theta/2, 270 + theta/2,
-                                facecolor='#2b83ba',  # 蓝色
-                                edgecolor='w',
-                                alpha=0.8
-                            )
+                            theta = 360 * abs_value
+                            wedge = Wedge((x, y), radius, 270 - theta/2, 270 + theta/2, facecolor='#2b83ba', edgecolor='w', alpha=0.8)
                         ax.add_patch(wedge)
-
-                    # 标记高相关性（|r|>0.9 且不在对角线）
+                    
                     if abs_value > 0.9 and i != j:
                         ax.plot(x, y, '*', color='gold', markersize=12, markeredgecolor='k')
-
-    # 调整坐标轴
-    plt.xticks(
-        ticks=np.arange(correlation_matrix.shape[1]) + 0.5,
-        labels=correlation_matrix.columns,
-        rotation=45,
-        ha='right',
-        fontsize=10
-    )
-    plt.yticks(
-        ticks=np.arange(correlation_matrix.shape[0]) + 0.5,
-        labels=correlation_matrix.columns,
-        fontsize=10
-    )
+    
+    plt.xticks(ticks=np.arange(correlation_matrix.shape[1]) + 0.5, labels=correlation_matrix.columns, rotation=45, ha='right', fontsize=10)
+    plt.yticks(ticks=np.arange(correlation_matrix.shape[0]) + 0.5, labels=correlation_matrix.columns, fontsize=10)
     plt.xlim(0, correlation_matrix.shape[1])
     plt.ylim(correlation_matrix.shape[0], 0)
     ax.invert_yaxis()
-
-    # 添加图例
+    
     legend_elements = [
-        Line2D([0], [0],
-               marker='o',
-               color='w',
-               label='Positive (r>0)',
-               markerfacecolor='#d7191c',
-               markersize=15),
-        Line2D([0], [0],
-               marker='o',
-               color='w',
-               label='Negative (r<0)',
-               markerfacecolor='#2b83ba',
-               markersize=15),
-        Line2D([0], [0],
-               marker='*',
-               color='gold',
-               label='|r| > 0.9',
-               markersize=15,
-               markeredgecolor='k')
+        Line2D([0], [0], marker='o', color='w', label='Positive (r>0)', markerfacecolor='#d7191c', markersize=15),
+        Line2D([0], [0], marker='o', color='w', label='Negative (r<0)', markerfacecolor='#2b83ba', markersize=15),
+        Line2D([0], [0], marker='*', color='gold', label='|r| > 0.9', markersize=15, markeredgecolor='k')
     ]
-
-    plt.legend(
-        handles=legend_elements,
-        title='Legend',
-        bbox_to_anchor=(1.05, 1),
-        loc='upper left',
-        frameon=True
-    )
-
-    # 添加标题
+    
+    plt.legend(handles=legend_elements, title='Legend', bbox_to_anchor=(1.05, 1), loc='upper left', frameon=True)
     plt.title("Pearson Correlation Matrix", fontsize=14, pad=20)
     plt.tight_layout()
     plt.grid(False)
     plt.show()
 
-# 绘制相关性矩阵
 plot_correlation_matrix(correlation_matrix)
 
-# --------- 自定义分组函数 ---------
 def custom_group_kfold(X, y, group_labels, n_splits=5, random_state=42):
-    """ 按组均匀分配样本到每个折叠中 """
     from sklearn.model_selection import KFold
-
     unique_groups = np.unique(group_labels)
     groups = {group: np.where(group_labels == group)[0] for group in unique_groups}
-
-    # 创建 KFold
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     fold_indices = {i: [] for i in range(n_splits)}
-
-    # 按照折叠进行分配
     for group in unique_groups:
         group_samples = groups[group]
-        # 在每个折叠中均匀分配该组的样本
         for fold, (train_idx, test_idx) in enumerate(kf.split(group_samples)):
             fold_indices[fold].extend(group_samples[test_idx])
-
-    # 确保每个折叠的样本分布均匀
     for fold in fold_indices:
         fold_indices[fold] = np.array(fold_indices[fold])
     return fold_indices
 
-# Define group labels
 group_sizes = [15,6,12,5,11,11,7,5,9,5,7,11,7]
 group_labels = []
 current_group = 1
@@ -262,75 +151,43 @@ for size in group_sizes:
     current_group += 1
 group_labels = np.array(group_labels)
 
-# --------- 十次五折交叉验证评估函数 ---------
 def evaluate_model_with_ten_fold_cv(model, X, y):
-    """使用十次五折交叉验证评估模型性能"""
     all_rmse_results = []
     all_r2_results = []
-
-    for seed in range(40, 50):  # seeds 40-49
+    for seed in range(40, 50):
         fold_indices = custom_group_kfold(X, y, group_labels, n_splits=5, random_state=seed)
-
         for fold, test_idx in fold_indices.items():
             train_idx = np.setdiff1d(np.arange(len(X)), test_idx)
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
-            # 训练模型
             model.fit(X_train, y_train)
             y_pred = model.predict(X_test)
-
-            # 计算性能指标
             rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             r2 = r2_score(y_test, y_pred)
-
             all_rmse_results.append(rmse)
             all_r2_results.append(r2)
-
-    # 返回50个结果的均值和标准差
     mean_rmse = np.mean(all_rmse_results)
     std_rmse = np.std(all_rmse_results)
     mean_r2 = np.mean(all_r2_results)
     std_r2 = np.std(all_r2_results)
-
     return mean_rmse, std_rmse, mean_r2, std_r2, all_rmse_results, all_r2_results
 
-# --------- 使用贝叶斯优化找到的最佳参数进行训练 ---------
-best_C = 900.81  # 从贝叶斯优化得到的最佳 C
-best_epsilon = 3.8196  # 从贝叶斯优化得到的最佳 epsilon
-
-# 使用最佳参数训练模型
+best_C = 900.81
+best_epsilon = 3.8196
 best_model = SVR(C=best_C, epsilon=best_epsilon, kernel='rbf')
 
-# --------- 基准模型十次五折交叉验证 ---------
-print("正在进行基准模型十次五折交叉验证...")
 base_rmse, base_rmse_std, base_r2, base_r2_std, base_rmse_all, base_r2_all = evaluate_model_with_ten_fold_cv(best_model, X_scaled, y)
 
-print(f"基准模型 - 10x5-Fold CV RMSE = {base_rmse:.4f} ± {base_rmse_std:.4f}")
-print(f"基准模型 - 10x5-Fold CV R² = {base_r2:.4f} ± {base_r2_std:.4f}")
-
-# --------- 提取所有高相关特征 ---------
 high_corr_features = set()
 for pair in high_corr_pairs:
     high_corr_features.add(pair[0])
     high_corr_features.add(pair[1])
 
-print(f"\n总共 {len(high_corr_features)} 个高相关特征:")
-for feature in high_corr_features:
-    print(f"- {feature}")
-
-# --------- 循环删除高相关特征 ---------
 results = []
 
-print(f"\n开始评估删除每个高相关特征的效果...")
-# 先评估删除每个高相关特征的效果
 for i, feature in enumerate(high_corr_features):
-    print(f"正在评估删除特征 '{feature}' ({i+1}/{len(high_corr_features)})...")
     X_temp = X_scaled.drop(columns=[feature])
-
-    # 十次五折交叉验证
     temp_rmse, temp_rmse_std, temp_r2, temp_r2_std, temp_rmse_all, temp_r2_all = evaluate_model_with_ten_fold_cv(best_model, X_temp, y)
-
     results.append({
         'feature': feature,
         'rmse_mean': temp_rmse,
@@ -339,43 +196,20 @@ for i, feature in enumerate(high_corr_features):
         'r2_std': temp_r2_std
     })
 
-    print(f"删除特征 '{feature}' - RMSE: {temp_rmse:.4f} ± {temp_rmse_std:.4f}, R²: {temp_r2:.4f} ± {temp_r2_std:.4f}")
-
-# 按RMSE均值排序结果
 results_sorted = sorted(results, key=lambda x: x['rmse_mean'])
 
-print("\n按RMSE均值排序的删除特征结果:")
-for result in results_sorted:
-    print(f"删除特征 '{result['feature']}' - RMSE: {result['rmse_mean']:.4f}, R²: {result['r2_mean']:.4f}")
-
-# --------- 保存特征删除结果到Excel ---------
 results_df = pd.DataFrame(results_sorted)
-results_df.to_excel('Feature_Removal_Results.xlsx', index=False, sheet_name='Results')
-print("特征删除结果已保存到 'Feature_Removal_Results.xlsx'")
+results_df.to_excel('feature_removal_results.xlsx', index=False, sheet_name='Results')
 
-# 最佳删除特征
 best_feature = results_sorted[0]['feature']
 best_rmse = results_sorted[0]['rmse_mean']
 best_rmse_std = results_sorted[0]['rmse_std']
 best_r2 = results_sorted[0]['r2_mean']
 best_r2_std = results_sorted[0]['r2_std']
 
-print(f"\n最佳删除特征: {best_feature}")
-print(f"RMSE: {best_rmse:.4f}, R²: {best_r2:.4f}")
-
-# --------- 使用最佳特征删除方案进行最终评估 ---------
-print(f"\n正在进行删除特征 '{best_feature}' 后的最终评估...")
 X_best = X_scaled.drop(columns=[best_feature])
-
-# 十次五折交叉验证
 final_rmse, final_rmse_std, final_r2, final_r2_std, final_rmse_all, final_r2_all = evaluate_model_with_ten_fold_cv(best_model, X_best, y)
 
-print(f"\n最终模型 - 10x5-Fold CV RMSE = {final_rmse:.4f} ± {final_rmse_std:.4f}")
-print(f"最终模型 - 10x5-Fold CV R² = {final_r2:.4f} ± {final_r2_std:.4f}")
-print(f"相比基准模型改进的RMSE: {base_rmse - final_rmse:.4f}")
-print(f"相比基准模型改进的R²: {final_r2 - base_r2:.4f}")
-
-# --------- 保存最终结果摘要到Excel ---------
 final_results = pd.DataFrame({
     'Model': ['Baseline', 'After Feature Removal'],
     'RMSE_Mean': [base_rmse, final_rmse],
@@ -385,32 +219,12 @@ final_results = pd.DataFrame({
     'Features_Used': [X_scaled.shape[1], X_best.shape[1]],
     'Removed_Feature': ['None', best_feature]
 })
-final_results.to_excel('Final_Model_Comparison.xlsx', index=False, sheet_name='Comparison')
-print("最终模型对比结果已保存到 'Final_Model_Comparison.xlsx'")
+final_results.to_excel('final_model_comparison.xlsx', index=False, sheet_name='Comparison')
 
-# --------- 保存所有交叉验证结果的详细数据 ---------
 cv_details = pd.DataFrame({
     'Baseline_RMSE': base_rmse_all,
     'Baseline_R2': base_r2_all,
     'Final_RMSE': final_rmse_all,
     'Final_R2': final_r2_all
 })
-cv_details.to_excel('Cross_Validation_Details.xlsx', index=False, sheet_name='CV_Results')
-print("交叉验证详细结果已保存到 'Cross_Validation_Details.xlsx'")
-
-print("\n=== 所有Excel文件保存完成 ===")
-print("1. Pearson_Analysis_Results.xlsx - 综合Pearson相关性分析")
-print("2. Feature_Removal_Results.xlsx - 特征删除实验结果")
-print("3. Final_Model_Comparison.xlsx - 最终模型对比")
-print("4. Cross_Validation_Details.xlsx - 交叉验证详细结果（50个数据点）")
-
-# # --------- 绘制预测值 vs 真实值 ---------
-# plt.figure(figsize=(8, 8))
-# plt.scatter(y, y_pred, alpha=0.7)
-# plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--')
-# plt.xlabel("True Yield Strength")
-# plt.ylabel("Predicted Yield Strength")
-# plt.title(f"删除最佳特征 '{best_feature}' 后的预测结果\nRMSE: {final_rmse:.4f}, R²: {final_r2:.4f}")
-# plt.grid(True)
-# plt.tight_layout()
-# plt.show()
+cv_details.to_excel('cv_details.xlsx', index=False, sheet_name='CV_Results')
