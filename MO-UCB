@@ -190,7 +190,7 @@ class CustomOptimizer:
             try:
                 yield_mean, yield_std, elong_mean, elong_std, Ti, V, Zr, Nb, Hf, Ta, Al, Mo = calculate_features_and_predict(V, Zr, Nb, Hf, Ta, Al, Mo, T1, t1, cold_rolling, T2, t2, models)
               
-                elif acq_function == 'ucb':
+                if acq_function == 'ucb':
                     kappa = 2.0
                     acq_value = self.upper_confidence_bound(yield_mean * elong_mean, yield_std * elong_std, kappa)
                 elif acq_function == 'product':
@@ -315,8 +315,8 @@ def main():
     result = custom_optimizer.maximize(init_points=10, n_iter=5, acq_function='product')
     end_time = time.time()
     
-    yield_seeds = [40, 41, 42, 43，44]
-    elongation_seeds = [40, 41, 42, 43，44]
+    yield_seeds = [40, 41, 42, 43, 44]
+    elongation_seeds = [40, 41, 42, 43, 44]
     models = load_models(yield_seeds, elongation_seeds)
     
     best_params = result['params']
