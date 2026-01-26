@@ -7,14 +7,13 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 
-# AdvancedNN模型定义
 class AdvancedNN(nn.Module):
     def __init__(self, input_size, n_hidden, num_layers, dropout_prob):
         super().__init__()
         layers = []
         for i in range(num_layers):
             layers.append(nn.Linear(input_size if i == 0 else n_hidden, n_hidden))
-            layers.append(nn.LayerNorm(n_hidden))  # 将BatchNorm改为LayerNorm
+            layers.append(nn.LayerNorm(n_hidden))
             layers.append(nn.LeakyReLU())
             layers.append(nn.Dropout(dropout_prob))
         layers.append(nn.Linear(n_hidden, 1))
@@ -30,19 +29,14 @@ class AdvancedNN(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu')
                 nn.init.constant_(m.bias, 0)
 
-# 添加安全的全局类型 - 解决PyTorch 2.6加载问题
 try:
-    # 导入必要的模块
     import torch.serialization
     import numpy
-
-    # 为numpy.scalar类型添加安全加载
     torch.serialization.add_safe_globals([numpy.dtype])
     torch.serialization.add_safe_globals([numpy._core.multiarray.scalar])
 except Exception as e:
-    print(f"注意: 无法添加安全全局变量: {e}")
+    pass
 
-# 加载模型和超参数一次的函数
 def load_models(yield_seeds, elongation_seeds):
     models = {
         'yield_svr': [],
@@ -51,285 +45,193 @@ def load_models(yield_seeds, elongation_seeds):
         'elongation_ann': []
     }
 
-    # 加载屈服强度模型 (SVR 和 ANN)
-    for seed in yield_seeds:  # 屈服强度使用不同的随机种子
-        # 加载屈服强度 ANN 模型
-        for model_num in range(1, 11):  # 每个种子下10个模型
-            ann_yield_model_filename = f"/content/drive/MyDrive/高熵合金屈服强度总/高熵合金屈服强度2/Enhanced_model_seed{seed}_top{model_num}.pth"
-
-            # 检查ANN模型文件是否存在
+    for seed in yield_seeds:
+        for model_num in range(1, 11):
+            ann_yield_model_filename = f"/content/drive/MyDrive/HEA_yield_total/HEA_yield_2/Enhanced_model_seed{seed}_top{model_num}.pth"
             if os.path.exists(ann_yield_model_filename):
                 try:
-                    # 尝试使用不同的加载选项
                     try:
-                        # 首先尝试使用weights_only=False加载
                         saved_data = torch.load(ann_yield_model_filename, weights_only=False, map_location='cpu')
                     except Exception:
-                        # 如果失败，尝试其他方式
                         try:
-                            # 尝试不指定weights_only
                             saved_data = torch.load(ann_yield_model_filename, map_location='cpu')
                         except Exception as e:
-                            print(f"尝试不同方式加载屈服强度ANN模型失败: {e}")
                             continue
-
-                    # 存储ANN模型数据
                     ann_model = {
                         'model_data': saved_data,
                         'filename': ann_yield_model_filename
                     }
                     models['yield_ann'].append(ann_model)
-                    # print(f"成功加载屈服强度ANN模型: {ann_yield_model_filename}")
                 except Exception as e:
-                    print(f"加载屈服强度ANN模型 {ann_yield_model_filename} 时出错: {e}")
+                    pass
 
-        # 加载屈服强度 SVR 模型
-        for model_num in range(10):  # 每个种子下10个模型
-            svr_yield_model_filename = f"/content/drive/MyDrive/高熵合金屈服强度总/高熵合金屈服强度2/SVR_model_seed_{seed}_model_{model_num + 1}.joblib"
-
-            # 检查SVR模型文件是否存在
+        for model_num in range(10):
+            svr_yield_model_filename = f"/content/drive/MyDrive/HEA_yield_total/HEA_yield_2/SVR_model_seed_{seed}_model_{model_num + 1}.joblib"
             if os.path.exists(svr_yield_model_filename):
                 try:
-                    # 加载屈服强度 SVR 模型
                     svr_yield_model = joblib.load(svr_yield_model_filename)
                     models['yield_svr'].append(svr_yield_model)
-                    # print(f"成功加载屈服强度SVR模型: {svr_yield_model_filename}")
                 except Exception as e:
-                    print(f"加载屈服强度SVR模型 {svr_yield_model_filename} 时出错: {e}")
+                    pass
 
-    # 加载延伸率模型 (SVR 和 ANN)
-    for seed in elongation_seeds:  # 延伸率使用不同的随机种子
-        # 加载延伸率 ANN 模型
-        for model_num in range(1, 11):  # 每个种子下10个模型
-            ann_elongation_model_filename = f"/content/drive/MyDrive/高熵合金延伸率总/高熵合金延伸率2/Enhanced_model_seed{seed}_top{model_num}.pth"
-
-            # 检查ANN模型文件是否存在
+    for seed in elongation_seeds:
+        for model_num in range(1, 11):
+            ann_elongation_model_filename = f"/content/drive/MyDrive/HEA_elongation_total/HEA_elongation_2/Enhanced_model_seed{seed}_top{model_num}.pth"
             if os.path.exists(ann_elongation_model_filename):
                 try:
-                    # 尝试使用不同的加载选项
                     try:
-                        # 首先尝试使用weights_only=False加载
                         saved_data = torch.load(ann_elongation_model_filename, weights_only=False, map_location='cpu')
                     except Exception:
-                        # 如果失败，尝试其他方式
                         try:
-                            # 尝试不指定weights_only
                             saved_data = torch.load(ann_elongation_model_filename, map_location='cpu')
                         except Exception as e:
-                            print(f"尝试不同方式加载延伸率ANN模型失败: {e}")
                             continue
-
-                    # 存储ANN模型数据
                     ann_model = {
                         'model_data': saved_data,
                         'filename': ann_elongation_model_filename
                     }
                     models['elongation_ann'].append(ann_model)
-                    # print(f"成功加载延伸率ANN模型: {ann_elongation_model_filename}")
                 except Exception as e:
-                    print(f"加载延伸率ANN模型 {ann_elongation_model_filename} 时出错: {e}")
+                    pass
 
-        # 加载延伸率 SVR 模型
-        for model_num in range(10):  # 每个种子下10个模型
-            svr_elongation_model_filename = f"/content/drive/MyDrive/高熵合金延伸率总/高熵合金延伸率2/SVR_model_seed_{seed}_model_{model_num + 1}.joblib"
-
-            # 检查SVR模型文件是否存在
+        for model_num in range(10):
+            svr_elongation_model_filename = f"/content/drive/MyDrive/HEA_elongation_total/HEA_elongation_2/SVR_model_seed_{seed}_model_{model_num + 1}.joblib"
             if os.path.exists(svr_elongation_model_filename):
                 try:
-                    # 加载延伸率 SVR 模型
                     svr_elongation_model = joblib.load(svr_elongation_model_filename)
                     models['elongation_svr'].append(svr_elongation_model)
-                    # print(f"成功加载延伸率SVR模型: {svr_elongation_model_filename}")
                 except Exception as e:
-                    print(f"加载延伸率SVR模型 {svr_elongation_model_filename} 时出错: {e}")
-
-    # 打印加载的模型数量
-    print(f"加载了 {len(models['yield_svr'])} 个屈服强度SVR模型")
-    print(f"加载了 {len(models['yield_ann'])} 个屈服强度ANN模型")
-    print(f"加载了 {len(models['elongation_svr'])} 个延伸率SVR模型")
-    print(f"加载了 {len(models['elongation_ann'])} 个延伸率ANN模型")
+                    pass
 
     return models
 
-# 使用加载的模型进行预测
 def predict_with_loaded_models(X1, X2, models):
-    # 标准化数据
     scaler1 = StandardScaler()
     scaler2 = StandardScaler()
 
-    # 读取屈服强度数据用于拟合标准化器
-    file_path = r'/content/屈服强度第二次迭代.xlsx'
+    file_path = r'/content/yield_strength_iter2.xlsx'
     data = pd.read_excel(file_path)
     data = data.dropna()
-    m1 = data.iloc[:, :-1]  # 特征
-    scaler1.fit(m1)  # 拟合标准化器
+    m1 = data.iloc[:, :-1]
+    scaler1.fit(m1)
 
-    # 读取延伸率数据用于拟合标准化器
-    file_path = r'/content/延伸率第二轮迭代.xlsx'
+    file_path = r'/content/elongation_iter2.xlsx'
     data = pd.read_excel(file_path)
     data = data.dropna()
-    n1 = data.iloc[:, :-1]  # 特征
-    scaler2.fit(n1)  # 拟合标准化器
+    n1 = data.iloc[:, :-1]
+    scaler2.fit(n1)
 
-    # 对输入数据进行标准化
-    X1_scaled = scaler1.transform(X1)  # 屈服强度的输入数据标准化
-    X2_scaled = scaler2.transform(X2)  # 延伸率的输入数据标准化
+    X1_scaled = scaler1.transform(X1)
+    X2_scaled = scaler2.transform(X2)
 
-    # ---------- 屈服强度预测 ----------
     yield_predictions = []
 
-    # 使用ANN模型预测屈服强度
     for model_data in models['yield_ann']:
         try:
             saved_data = model_data['model_data']
-
-            # 重建模型
             ann_model = AdvancedNN(
                 input_size=X1_scaled.shape[1],
                 n_hidden=int(saved_data['params']['n_hidden']),
                 num_layers=int(saved_data['params']['num_layers']),
                 dropout_prob=saved_data['params']['dropout_prob']
             )
-
-            # 加载权重
             ann_model.load_state_dict(saved_data['model_state'])
-
-            # 预测
             ann_model.eval()
             with torch.no_grad():
                 X_tensor = torch.tensor(X1_scaled, dtype=torch.float32)
                 prediction = ann_model(X_tensor).numpy().flatten()
                 yield_predictions.append(prediction)
-                # print(f"屈服强度ANN模型 {model_data['filename']} 预测成功")
         except Exception as e:
-            print(f"使用屈服强度ANN模型 {model_data['filename']} 预测时出错: {e}")
+            pass
 
-    # SVR模型预测屈服强度
     for model in models['yield_svr']:
         try:
             prediction = model.predict(X1_scaled)
             yield_predictions.append(prediction)
-            # print(f"屈服强度SVR模型预测成功")
         except Exception as e:
-            print(f"屈服强度SVR预测出错: {e}")
+            pass
 
-    # 计算屈服强度的均值和不确定性（标准差）
     if yield_predictions:
         yield_predictions = np.array(yield_predictions)
-        print(f"成功完成 {len(yield_predictions)} 个屈服强度模型的预测，预测形状: {yield_predictions.shape}")
-        yield_mean_prediction = yield_predictions.mean(axis=0)  # 均值
-        yield_uncertainty = yield_predictions.std(axis=0)  # 直接计算标准差作为不确定性
+        yield_mean_prediction = yield_predictions.mean(axis=0)
+        yield_uncertainty = yield_predictions.std(axis=0)
     else:
-        print("警告：没有任何屈服强度模型成功预测!")
         yield_mean_prediction = np.array([])
         yield_uncertainty = np.array([])
 
-    # ---------- 延伸率预测 ----------
     elongation_predictions = []
 
-    # 使用ANN模型预测延伸率
     for model_data in models['elongation_ann']:
         try:
             saved_data = model_data['model_data']
-
-            # 重建模型
             ann_model = AdvancedNN(
                 input_size=X2_scaled.shape[1],
                 n_hidden=int(saved_data['params']['n_hidden']),
                 num_layers=int(saved_data['params']['num_layers']),
                 dropout_prob=saved_data['params']['dropout_prob']
             )
-
-            # 加载权重
             ann_model.load_state_dict(saved_data['model_state'])
-
-            # 预测
             ann_model.eval()
             with torch.no_grad():
                 X_tensor = torch.tensor(X2_scaled, dtype=torch.float32)
                 prediction = ann_model(X_tensor).numpy().flatten()
                 elongation_predictions.append(prediction)
-                # print(f"延伸率ANN模型 {model_data['filename']} 预测成功")
         except Exception as e:
-            print(f"使用延伸率ANN模型 {model_data['filename']} 预测时出错: {e}")
+            pass
 
-    # SVR模型预测延伸率
     for model in models['elongation_svr']:
         try:
             prediction = model.predict(X2_scaled)
             elongation_predictions.append(prediction)
-            # print(f"延伸率SVR模型预测成功")
         except Exception as e:
-            print(f"延伸率SVR预测出错: {e}")
+            pass
 
-    # 计算延伸率的均值和不确定性（标准差）
     if elongation_predictions:
         elongation_predictions = np.array(elongation_predictions)
-        print(f"成功完成 {len(elongation_predictions)} 个延伸率模型的预测，预测形状: {elongation_predictions.shape}")
-        elongation_mean_prediction = elongation_predictions.mean(axis=0)  # 均值
-        elongation_uncertainty = elongation_predictions.std(axis=0)  # 直接计算标准差作为不确定性
+        elongation_mean_prediction = elongation_predictions.mean(axis=0)
+        elongation_uncertainty = elongation_predictions.std(axis=0)
     else:
-        print("警告：没有任何延伸率模型成功预测!")
         elongation_mean_prediction = np.array([])
         elongation_uncertainty = np.array([])
 
-    # 返回结果
     return yield_mean_prediction, yield_uncertainty, elongation_mean_prediction, elongation_uncertainty
 
-# 主函数
 def main():
-    # 读取数据
-    yield_file_path = r'/content/屈服强度第二次迭代.xlsx'
+    yield_file_path = r'/content/yield_strength_iter2.xlsx'
     yield_data = pd.read_excel(yield_file_path)
     yield_data = yield_data.dropna()
 
-    elongation_file_path = r'/content/延伸率第二轮迭代.xlsx'
+    elongation_file_path = r'/content/elongation_iter2.xlsx'
     elongation_data = pd.read_excel(elongation_file_path)
     elongation_data = elongation_data.dropna()
 
-    # 特征和目标
-    X1 = yield_data.iloc[:, :-1]      # 屈服强度特征
-    y1 = yield_data.iloc[:, -1]       # 屈服强度目标值
+    X1 = yield_data.iloc[:, :-1]
+    y1 = yield_data.iloc[:, -1]
 
-    X2 = elongation_data.iloc[:, :-1]  # 延伸率特征
-    y2 = elongation_data.iloc[:, -1]   # 延伸率目标值
+    X2 = elongation_data.iloc[:, :-1]
+    y2 = elongation_data.iloc[:, -1]
 
-    # 加载模型
-    yield_seeds = [39, 40, 41, 42, 43]  # 屈服强度使用的随机种子
-    elongation_seeds = [2, 39, 44, 45, 256]  # 延伸率使用的随机种子
-    print("开始加载模型...")
+    yield_seeds = [39, 40, 41, 42, 43]
+    elongation_seeds = [2, 39, 44, 45, 256]
     models = load_models(yield_seeds, elongation_seeds)
 
-    # 预测
-    print(f"\n开始预测，屈服强度输入数据形状: {X1.shape}, 延伸率输入数据形状: {X2.shape}")
     yield_mean, yield_uncertainty, elongation_mean, elongation_uncertainty = predict_with_loaded_models(X1, X2, models)
 
-    # 打印屈服强度结果
     if len(yield_mean) > 0:
-        print("\n屈服强度预测结果示例 (前5个):")
-        print("预测均值:", yield_mean[:5])
-        print("预测不确定性:", yield_uncertainty[:5])
-
-        # 计算与真实值的RMSE和R²
         rmse_yield = np.sqrt(np.mean((yield_mean - y1)**2))
         ss_total_yield = np.sum((y1 - y1.mean())**2)
         ss_residual_yield = np.sum((y1 - yield_mean)**2)
         r2_yield = 1 - (ss_residual_yield / ss_total_yield)
-        print(f"屈服强度RMSE: {rmse_yield:.4f}")
-        print(f"屈服强度R²: {r2_yield:.4f}")
 
-        # 保存屈服强度结果到文件
         yield_result_df = pd.DataFrame({
             'Actual Values': y1,
             'Predicted Mean': yield_mean,
             'Prediction Uncertainty': yield_uncertainty
         })
 
-        yield_result_filename = '/content/drive/MyDrive/高熵合金数据/yield_ensemble_predictions.csv'
+        yield_result_filename = '/content/drive/MyDrive/HEA_data/yield_ensemble_predictions.csv'
         yield_result_df.to_csv(yield_result_filename, index=False)
-        print(f"屈服强度集成预测结果已保存到: {yield_result_filename}")
 
-        # 可视化屈服强度预测
         plt.figure(figsize=(10, 6))
         plt.scatter(y1, yield_mean, color='blue', label='Predictions vs Actual', marker='o')
         plt.errorbar(y1, yield_mean, yerr=yield_uncertainty, fmt='o', color='red', label='Uncertainty (Standard Deviation)')
@@ -341,39 +243,25 @@ def main():
         plt.legend()
         plt.tight_layout()
 
-        yield_plt_filename = '/content/drive/MyDrive/高熵合金数据/yield_ensemble_visualization.png'
+        yield_plt_filename = '/content/drive/MyDrive/HEA_data/yield_ensemble_visualization.png'
         plt.savefig(yield_plt_filename)
         plt.show()
-        print(f"屈服强度可视化结果已保存到: {yield_plt_filename}")
-    else:
-        print("没有可用的屈服强度预测结果")
 
-    # 打印延伸率结果
     if len(elongation_mean) > 0:
-        print("\n延伸率预测结果示例 (前5个):")
-        print("预测均值:", elongation_mean[:5])
-        print("预测不确定性:", elongation_uncertainty[:5])
-
-        # 计算与真实值的RMSE和R²
         rmse_elongation = np.sqrt(np.mean((elongation_mean - y2)**2))
         ss_total_elongation = np.sum((y2 - y2.mean())**2)
         ss_residual_elongation = np.sum((y2 - elongation_mean)**2)
         r2_elongation = 1 - (ss_residual_elongation / ss_total_elongation)
-        print(f"延伸率RMSE: {rmse_elongation:.4f}")
-        print(f"延伸率R²: {r2_elongation:.4f}")
 
-        # 保存延伸率结果到文件
         elongation_result_df = pd.DataFrame({
             'Actual Values': y2,
             'Predicted Mean': elongation_mean,
             'Prediction Uncertainty': elongation_uncertainty
         })
 
-        elongation_result_filename = '/content/drive/MyDrive/高熵合金数据/elongation_ensemble_predictions.csv'
+        elongation_result_filename = '/content/drive/MyDrive/HEA_data/elongation_ensemble_predictions.csv'
         elongation_result_df.to_csv(elongation_result_filename, index=False)
-        print(f"延伸率集成预测结果已保存到: {elongation_result_filename}")
 
-        # 可视化延伸率预测
         plt.figure(figsize=(10, 6))
         plt.scatter(y2, elongation_mean, color='blue', label='Predictions vs Actual', marker='o')
         plt.errorbar(y2, elongation_mean, yerr=elongation_uncertainty, fmt='o', color='red', label='Uncertainty (Standard Deviation)')
@@ -385,12 +273,9 @@ def main():
         plt.legend()
         plt.tight_layout()
 
-        elongation_plt_filename = '/content/drive/MyDrive/高熵合金数据/elongation_ensemble_visualization.png'
+        elongation_plt_filename = '/content/drive/MyDrive/HEA_data/elongation_ensemble_visualization.png'
         plt.savefig(elongation_plt_filename)
         plt.show()
-        print(f"延伸率可视化结果已保存到: {elongation_plt_filename}")
-    else:
-        print("没有可用的延伸率预测结果")
 
 if __name__ == "__main__":
     main()
