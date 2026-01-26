@@ -24,7 +24,7 @@ def train_model(C, epsilon):
         'kernel': 'rbf'
     }
     model = SVR(**params)
-    kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
     y_pred = cross_val_predict(model, X, y, cv=kf)
     rmse = np.sqrt(mean_squared_error(y, y_pred))
     r2 = r2_score(y, y_pred)
@@ -58,7 +58,7 @@ best_model = SVR(
     kernel='rbf'
 )
 
-kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
 y_pred = cross_val_predict(best_model, X, y, cv=kf)
 
 rmse = np.sqrt(mean_squared_error(y, y_pred))
@@ -66,8 +66,6 @@ r2 = r2_score(y, y_pred)
 
 plt.figure(figsize=(6,6))
 plt.scatter(y, y_pred, alpha=0.7)
-for i in range(len(y)):
-    plt.text(y[i], y_pred[i], f"({y[i]:.2f}, {y_pred[i]:.2f})", fontsize=8, alpha=0.7, color='blue', ha='right', va='bottom')
 plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--')
 plt.xlabel("True Yield Strength")
 plt.ylabel("Predicted Yield Strength")
