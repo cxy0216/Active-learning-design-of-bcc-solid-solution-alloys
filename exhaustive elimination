@@ -8,47 +8,32 @@ from sklearn.model_selection import KFold
 from itertools import combinations
 import time
 
-# --------- 读取数据 ---------
-file_path = r'/content/屈服强度特征穷举消除.xlsx'
+file_path = r'/content/yield_strength_features_exhaustive.xlsx'
 data = pd.read_excel(file_path)
 
-# --------- 特征 & 目标 ---------
-X = data.iloc[:, :-1]  # 特征列
-y = data.iloc[:, -1]   # 目标变量
+X = data.iloc[:, :-1]
+y = data.iloc[:, -1]
 
-# --------- 数据归一化 ---------
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
 
-# 获取最佳超参数
 best_C = 900.81
 best_epsilon = 3.8196
-print(f"Initial Best Parameters: C = {best_C}, epsilon = {best_epsilon}")
 
-# --------- 自定义分组函数 ---------
 def custom_group_kfold(X, y, group_labels, n_splits=5, random_state=42):
-    """ 按组均匀分配样本到每个折叠中 """
     unique_groups = np.unique(group_labels)
     groups = {group: np.where(group_labels == group)[0] for group in unique_groups}
-
-    # 创建 KFold
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     fold_indices = {i: [] for i in range(n_splits)}
-
-    # 按照折叠进行分配
     for group in unique_groups:
         group_samples = groups[group]
-        # 在每个折叠中均匀分配该组的样本
         for fold, (train_idx, test_idx) in enumerate(kf.split(group_samples)):
             fold_indices[fold].extend(group_samples[test_idx])
-
-    # 确保每个折叠的样本分布均匀
     for fold in fold_indices:
         fold_indices[fold] = np.array(fold_indices[fold])
     return fold_indices
 
-# Define group labels
 group_sizes = [15,6,12,5,11,11,7,5,9,5,7,11,7]
 group_labels = []
 current_group = 1
@@ -57,67 +42,35 @@ for size in group_sizes:
     current_group += 1
 group_labels = np.array(group_labels)
 
-# --------- 十次五折交叉验证评估函数 ---------
 def evaluate_model_with_ten_fold_cv(X, y):
-    """使用十次五折交叉验证评估模型性能"""
     all_rmse_results = []
     all_r2_results = []
-
-    for seed in range(40, 50):  # seeds 40-49
+    for seed in range(40, 50):
         fold_indices = custom_group_kfold(X, y, group_labels, n_splits=5, random_state=seed)
-
         for fold, test_idx in fold_indices.items():
             train_idx = np.setdiff1d(np.arange(len(X)), test_idx)
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
-            # 训练模型
             model = SVR(C=best_C, epsilon=best_epsilon, kernel='rbf')
             model.fit(X_train, y_train)
             y_pred = model.predict(X_test)
-
-            # 计算性能指标
             rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             r2 = r2_score(y_test, y_pred)
-
             all_rmse_results.append(rmse)
             all_r2_results.append(r2)
-
-    # 返回50个结果的均值和标准差
     mean_rmse = np.mean(all_rmse_results)
     std_rmse = np.std(all_rmse_results)
     mean_r2 = np.mean(all_r2_results)
     std_r2 = np.std(all_r2_results)
-
     return mean_rmse, std_rmse, mean_r2, std_r2
 
-# --------- 穷举消除特征选择 ---------
-# 固定前13个特征，对后面的特征进行穷举消除
 fixed_features = list(X_scaled.columns[:13])
 candidate_features = list(X_scaled.columns[13:])
 
-print(f"开始穷举消除特征选择")
-print(f"固定特征数: {len(fixed_features)}")
-print(f"候选特征数: {len(candidate_features)}")
-print(f"固定特征: {fixed_features}")
-print(f"候选特征: {candidate_features}")
-
-# 计算所有可能的组合数量
 total_combinations = 0
-for r in range(len(candidate_features) + 1):  # 从0个到全部候选特征
+for r in range(len(candidate_features) + 1):
     total_combinations += len(list(combinations(candidate_features, r)))
 
-print(f"总共需要评估的组合数: {total_combinations}")
-print(f"预计运行时间: 约 {total_combinations * 2 / 60:.1f} 分钟（假设每个组合2秒）")
-
-# 用户确认
-print("\n⚠️  警告：穷举搜索将评估所有可能的特征组合，可能需要很长时间！")
-confirm = input("是否继续？(y/n): ")
-if confirm.lower() != 'y':
-    print("已取消穷举搜索")
-    exit()
-
-# 存储所有结果
 all_results = []
 best_global_rmse = float('inf')
 best_global_feature_set = None
@@ -126,31 +79,18 @@ best_global_performance = None
 start_time = time.time()
 combination_count = 0
 
-print(f"\n🚀 开始穷举搜索...")
-
-# 遍历所有可能的候选特征组合
-for r in range(len(candidate_features) + 1):  # 从0个到全部候选特征
-    print(f"\n=== 评估包含 {r} 个候选特征的组合 ===")
-
+for r in range(len(candidate_features) + 1):
     if r == 0:
-        # 只使用固定特征
         feature_combinations = [()]
     else:
         feature_combinations = list(combinations(candidate_features, r))
 
-    print(f"该组合大小的数量: {len(feature_combinations)}")
-
     for i, selected_candidates in enumerate(feature_combinations):
         combination_count += 1
-
-        # 构建当前特征集（固定特征 + 选中的候选特征）
         current_features = fixed_features + list(selected_candidates)
         X_current = X_scaled[current_features]
-
-        # 评估当前特征组合
         rmse, rmse_std, r2, r2_std = evaluate_model_with_ten_fold_cv(X_current, y)
 
-        # 记录结果
         result = {
             'Combination_ID': combination_count,
             'Total_Features': len(current_features),
@@ -165,54 +105,21 @@ for r in range(len(candidate_features) + 1):  # 从0个到全部候选特征
         }
         all_results.append(result)
 
-        # 更新全局最佳结果
         if rmse < best_global_rmse:
             best_global_rmse = rmse
             best_global_feature_set = current_features.copy()
             best_global_performance = result.copy()
-            print(f"  🌟 发现新的全局最佳! 组合 {combination_count}: {len(current_features)}个特征, RMSE={rmse:.4f}±{rmse_std:.4f}")
 
-        # 显示进度
-        if combination_count % 50 == 0 or combination_count <= 10:
-            elapsed_time = time.time() - start_time
-            avg_time_per_combination = elapsed_time / combination_count
-            estimated_total_time = avg_time_per_combination * total_combinations
-            remaining_time = estimated_total_time - elapsed_time
-
-            print(f"  进度: {combination_count}/{total_combinations} ({100*combination_count/total_combinations:.1f}%)")
-            print(f"  当前组合: {len(current_features)}个特征, RMSE={rmse:.4f}±{rmse_std:.4f}")
-            print(f"  已用时间: {elapsed_time/60:.1f}分钟, 预计剩余: {remaining_time/60:.1f}分钟")
-
-print(f"\n🎉 穷举搜索完成！")
-print(f"总计评估了 {combination_count} 个特征组合")
-print(f"总用时: {(time.time() - start_time)/60:.1f} 分钟")
-
-# --------- 分析结果 ---------
-print(f"\n🌟 全局最佳结果:")
-print(f"组合ID: {best_global_performance['Combination_ID']}")
-print(f"特征总数: {best_global_performance['Total_Features']}")
-print(f"候选特征数: {best_global_performance['Selected_Candidates']}")
-print(f"RMSE: {best_global_performance['RMSE_Mean']:.4f} ± {best_global_performance['RMSE_Std']:.4f}")
-print(f"R²: {best_global_performance['R2_Mean']:.4f} ± {best_global_performance['R2_Std']:.4f}")
-print(f"选中的候选特征: {best_global_performance['Selected_Candidate_Names']}")
-print(f"完整特征集: {best_global_performance['All_Features']}")
-
-# --------- 保存结果 ---------
 results_df = pd.DataFrame(all_results)
-
-# 按RMSE排序
 results_df_sorted = results_df.sort_values('RMSE_Mean').reset_index(drop=True)
 
-# 保存详细结果
-output_file = '/content/drive/MyDrive/高熵合金数据/屈服强度穷举消除结果.xlsx'
+output_file = '/content/drive/MyDrive/HEA_data/exhaustive_results.xlsx'
 results_df_sorted.to_excel(output_file, index=False)
 
-# 保存最佳结果分析
-top_results = results_df_sorted.head(20)  # 前20个最佳结果
-top_results_file = '/content/drive/MyDrive/高熵合金数据/屈服强度穷举消除前20最佳.xlsx'
+top_results = results_df_sorted.head(20)
+top_results_file = '/content/drive/MyDrive/HEA_data/exhaustive_top20.xlsx'
 top_results.to_excel(top_results_file, index=False)
 
-# 保存最佳特征子集详细信息
 best_subset_info = pd.DataFrame({
     'Metric': ['Combination_ID', 'Total_Features', 'Selected_Candidates', 'RMSE_Mean', 'RMSE_Std', 'R2_Mean', 'R2_Std'],
     'Value': [
@@ -231,43 +138,20 @@ best_features_list = pd.DataFrame({
     'Feature_Name': fixed_features + best_global_performance['Selected_Candidate_Names']
 })
 
-# 保存最佳特征组合
-best_combination_file = '/content/drive/MyDrive/高熵合金数据/屈服强度穷举消除最佳组合.xlsx'
+best_combination_file = '/content/drive/MyDrive/HEA_data/exhaustive_best_combination.xlsx'
 with pd.ExcelWriter(best_combination_file, engine='openpyxl') as writer:
     best_subset_info.to_excel(writer, sheet_name='Performance_Info', index=False)
     best_features_list.to_excel(writer, sheet_name='Feature_List', index=False)
 
-print(f"\n📁 结果已保存:")
-print(f"  完整结果: {output_file}")
-print(f"  前20最佳结果: {top_results_file}")
-print(f"  最佳特征组合: {best_combination_file}")
-
-# --------- 结果分析和可视化 ---------
-print(f"\n📊 结果统计分析:")
-print(f"平均RMSE: {results_df['RMSE_Mean'].mean():.4f}")
-print(f"最佳RMSE: {results_df['RMSE_Mean'].min():.4f}")
-print(f"最差RMSE: {results_df['RMSE_Mean'].max():.4f}")
-print(f"RMSE标准差: {results_df['RMSE_Mean'].std():.4f}")
-
-# 按特征数量分组分析
 feature_count_analysis = results_df.groupby('Total_Features').agg({
     'RMSE_Mean': ['count', 'mean', 'min', 'max', 'std'],
     'R2_Mean': ['mean', 'min', 'max']
 }).round(4)
 
-print(f"\n📈 按特征数量的性能分析:")
-print(feature_count_analysis)
-
-# 找出每个特征数量下的最佳结果
 best_by_feature_count = results_df.loc[results_df.groupby('Total_Features')['RMSE_Mean'].idxmin()]
-print(f"\n🏆 每个特征数量下的最佳结果:")
-for _, row in best_by_feature_count.iterrows():
-    print(f"  {row['Total_Features']}个特征: RMSE={row['RMSE_Mean']:.4f}±{row['RMSE_Std']:.4f}, R²={row['R2_Mean']:.4f}±{row['R2_Std']:.4f}")
 
-# 绘制特征数量vs性能的关系图
 plt.figure(figsize=(12, 8))
 
-# 子图1: RMSE vs 特征数量
 plt.subplot(2, 2, 1)
 feature_counts = results_df['Total_Features'].values
 rmse_values = results_df['RMSE_Mean'].values
@@ -279,7 +163,6 @@ plt.title('RMSE vs Number of Features')
 plt.legend()
 plt.grid(True, alpha=0.3)
 
-# 子图2: R² vs 特征数量
 plt.subplot(2, 2, 2)
 r2_values = results_df['R2_Mean'].values
 plt.scatter(feature_counts, r2_values, alpha=0.6, s=20)
@@ -290,7 +173,6 @@ plt.title('R² vs Number of Features')
 plt.legend()
 plt.grid(True, alpha=0.3)
 
-# 子图3: RMSE分布直方图
 plt.subplot(2, 2, 3)
 plt.hist(rmse_values, bins=30, alpha=0.7, edgecolor='black')
 plt.axvline(best_global_performance['RMSE_Mean'], color='red', linestyle='--', label=f'Best: {best_global_performance["RMSE_Mean"]:.4f}')
@@ -300,7 +182,6 @@ plt.title('RMSE Distribution')
 plt.legend()
 plt.grid(True, alpha=0.3)
 
-# 子图4: 前20最佳结果
 plt.subplot(2, 2, 4)
 top_20 = results_df_sorted.head(20)
 plt.bar(range(len(top_20)), top_20['RMSE_Mean'], alpha=0.7)
@@ -312,43 +193,31 @@ plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# 最终验证最佳特征组合
-print(f"\n🔍 最佳特征组合的独立验证:")
 X_best = X_scaled[best_global_feature_set]
 final_rmse, final_rmse_std, final_r2, final_r2_std = evaluate_model_with_ten_fold_cv(X_best, y)
-print(f"验证结果: RMSE={final_rmse:.4f} ± {final_rmse_std:.4f}, R²={final_r2:.4f} ± {final_r2_std:.4f}")
 
-# 绘制最佳特征组合的预测结果
-print(f"生成最佳特征组合的预测可视化...")
 all_y_true = []
 all_y_pred = []
 
 for seed in range(40, 50):
     fold_indices = custom_group_kfold(X_best, y, group_labels, n_splits=5, random_state=seed)
-
     for fold, test_idx in fold_indices.items():
         train_idx = np.setdiff1d(np.arange(len(X_best)), test_idx)
         X_train, X_test = X_best.iloc[train_idx], X_best.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-
         model = SVR(C=best_C, epsilon=best_epsilon, kernel='rbf')
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
-
         all_y_true.extend(y_test.tolist())
         all_y_pred.extend(y_pred.tolist())
 
 plt.figure(figsize=(10, 8))
 plt.scatter(all_y_true, all_y_pred, color='gold', alpha=0.6, label='Best Feature Combination')
-plt.plot([min(all_y_true), max(all_y_true)], [min(all_y_true), max(all_y_true)],
-         color='red', linestyle='--', label='Perfect Prediction')
+plt.plot([min(all_y_true), max(all_y_true)], [min(all_y_true), max(all_y_true)], color='red', linestyle='--', label='Perfect Prediction')
 plt.xlabel('Actual Values')
 plt.ylabel('Predicted Values')
-plt.title(f"Best Feature Combination Performance (Exhaustive Search)\n" +
-          f"Features: {len(best_global_feature_set)}, RMSE={final_rmse:.4f}±{final_rmse_std:.4f}, R²={final_r2:.4f}±{final_r2_std:.4f}")
+plt.title(f"Best Feature Combination Performance (Exhaustive Search)\nFeatures: {len(best_global_feature_set)}, RMSE={final_rmse:.4f}±{final_rmse_std:.4f}, R²={final_r2:.4f}±{final_r2_std:.4f}")
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
-
-print(f"\n✅ 穷举消除特征选择完成！")
