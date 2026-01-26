@@ -40,7 +40,7 @@ def train_model(num_leaves,
         'verbose': -1
     }
     model = LGBMRegressor(**params)
-    kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
     y_pred = cross_val_predict(model, X, y, cv=kf)
     rmse = np.sqrt(mean_squared_error(y, y_pred))
     r2 = r2_score(y, y_pred)
@@ -93,7 +93,7 @@ best_model = LGBMRegressor(
     min_child_weight=best_params['min_child_weight'],
 )
 
-kf = KFold(n_splits=len(y), shuffle=True, random_state=42)
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
 y_pred = cross_val_predict(best_model, X, y, cv=kf)
 
 rmse = np.sqrt(mean_squared_error(y, y_pred))
